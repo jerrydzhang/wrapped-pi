@@ -30,5 +30,13 @@
         touch "$out"
       '';
     });
+
+    devShells = forAllSystems (system: let
+      pkgs = nixpkgs.legacyPackages.${system};
+    in {
+      default = pkgs.mkShellNoCC {
+        packages = [pkgs.nodejs];
+      };
+    });
   };
 }
