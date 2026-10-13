@@ -3,7 +3,7 @@
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
-    llm-agents.url = "github:numtide/llm-agents.nix";
+    pi.url = "github:earendil-works/pi";
     saccade.url = "github:jerrydzhang/saccade";
     devenv.url = "github:cachix/devenv";
   };
@@ -16,7 +16,7 @@
   outputs = {
     self,
     nixpkgs,
-    llm-agents,
+    pi,
     saccade,
     devenv,
     ...
@@ -27,7 +27,7 @@
       pkgs = nixpkgs.legacyPackages.${system};
     in {
       default = pkgs.callPackage ./nix/package.nix {
-        pi = llm-agents.packages.${system}.pi;
+        pi = pi.packages.${system}.pi;
       };
     });
 
