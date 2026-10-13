@@ -3,6 +3,7 @@
 const REDIRECTS = {
 	typebox: new URL("./stubs/typebox.mjs", import.meta.url).href,
 	"@earendil-works/pi-coding-agent": new URL("./stubs/pi-coding-agent.mjs", import.meta.url).href,
+	"@earendil-works/pi-tui": new URL("./stubs/pi-tui.mjs", import.meta.url).href,
 };
 
 export async function resolve(specifier, context, next) {

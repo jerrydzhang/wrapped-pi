@@ -25,6 +25,18 @@ wrapped-pi executable without installing files into Pi's configuration.
 - **`bash_stop {id}`** — stops a background command this session started by
   terminating its process group (SIGTERM, then SIGKILL), and reports the
   observed outcome honestly; it does not claim settlement that did not happen.
+- **Footer status** — while any background command is running, the footer
+  carries one dim line naming each live job with a timer: `bg-1 34s` for an
+  untimed command, `bg-2 10s/1m30s` for one with a `timeout` (elapsed/total).
+  It refreshes on the poller's own tick and clears the moment nothing is
+  pending, so an idle session with jobs running is visibly different from an
+  idle session with nothing pending.
+- **`/bg`** — a snapshot card in the transcript listing this session's live
+  background commands (id, elapsed at check, elapsed/total when timed, the
+  command capped to one 80-char line, and the log path in the entry data).
+  Custom entries never enter
+  LLM context: the model cannot see the check, and the card stays an honest
+  record in scrollback and on disk.
 - **`timeout`** keeps the bash tool's existing convention: omitted means no
   deadline; a positive value limits total runtime, including time spent in the
   background. A command stopped at its deadline is reported through the
@@ -63,6 +75,7 @@ tool; it is expected and harmless.
   approximated, so background environment is not claimed bit-for-bit identical.
 - Output logs are plain temporary files under the OS temp directory, used only
   for result retrieval and mid-run inspection; there are no job records, no
-  persistence, no recovery, no list/status/output tools — this is not a job
-  platform.
+  persistence, no recovery, and no model-facing list/status/output tools —
+  this is not a job platform. Human-facing visibility (the footer line and
+  the `/bg` card) is read-only over in-memory state.
 - No Saccade semantics anywhere: the extension is fully generic.

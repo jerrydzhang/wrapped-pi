@@ -6,6 +6,15 @@ export function fakePi() {
 	const tools = new Map();
 	const handlers = new Map();
 	const sent = [];
+	const entries = [];
+	const commands = new Map();
+	const renderers = new Map();
+	const status = [];
+	const ui = () => ({
+		setStatus: (key, text) => status.push({ key, text }),
+		notify: () => {},
+		theme: { fg: (_color, text) => text },
+	});
 	const handle = {
 		registerTool: (def) => tools.set(def.name, def),
 		on: (event, cb) => {
@@ -15,16 +24,27 @@ export function fakePi() {
 		sendMessage: (message, options) => {
 			sent.push({ message, options });
 		},
+		appendEntry: (customType, data) => {
+			entries.push({ customType, data });
+		},
+		registerCommand: (name, options) => commands.set(name, options),
+		registerEntryRenderer: (customType, renderer) => renderers.set(customType, renderer),
 	};
 	return {
 		handle,
 		tools,
 		sent,
-		emit: async (event, payload = {}) => {
-			for (const cb of handlers.get(event) ?? []) await cb(payload, undefined);
+		entries,
+		commands,
+		renderers,
+		status,
+		ui,
+		emit: async (event, payload = {}, ctx = undefined) => {
+			for (const cb of handlers.get(event) ?? []) await cb(payload, ctx);
 		},
 		bash: () => tools.get("bash"),
 		bashStop: () => tools.get("bash_stop"),
+		bgCommand: () => commands.get("bg"),
 	};
 }
 

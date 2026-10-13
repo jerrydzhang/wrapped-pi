@@ -4,6 +4,7 @@ import { accessSync, closeSync, fstatSync, openSync, readSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Type } from "typebox";
+import { Box, Text } from "@earendil-works/pi-tui";
 import {
 	createBashToolDefinition,
 	getShellConfig,
@@ -68,6 +69,15 @@ function registry(): Registry {
 }
 
 let pi: ExtensionAPI | undefined;
+
+// The ui surface this extension touches, captured at session boundaries.
+// Undefined in headless modes and in tests.
+interface UiLike {
+	setStatus: (key: string, text: string | undefined) => void;
+	theme: { fg: (color: string, text: string) => string };
+}
+let ui: UiLike | undefined;
+const STATUS_KEY = "bash-bg";
 
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
@@ -233,6 +243,54 @@ function outputTail(job: BgJob): { text: string; cut: "none" | "lines" | "bytes"
 function oneLine(command: string): string {
 	const line = command.replace(/\s*\n\s*/g, " ");
 	return line.length > 120 ? `${line.slice(0, 117)}...` : line;
+}
+
+// The card caps tighter than oneLine: a snapshot row stays one line on any
+// reasonable pane instead of wrapping.
+function cardCommand(command: string): string {
+	const line = oneLine(command);
+	return line.length > 80 ? `${line.slice(0, 77)}...` : line;
+}
+
+function fmtElapsedMs(ms: number): string {
+	const s = Math.max(0, Math.round(ms / 1000));
+	return s >= 60 ? `${Math.floor(s / 60)}m${String(s % 60).padStart(2, "0")}s` : `${s}s`;
+}
+
+// Round totals drop the seconds: 2m, not 2m00s.
+function fmtTotalMs(ms: number): string {
+	const s = Math.max(0, Math.round(ms / 1000));
+	if (s < 60) return `${s}s`;
+	return s % 60 === 0 ? `${s / 60}m` : `${Math.floor(s / 60)}m${s % 60}s`;
+}
+
+// A timer, or elapsed/total when the job carries a deadline.
+function timerField(elapsedMs: number, totalMs: number | undefined): string {
+	return totalMs !== undefined ? `${fmtElapsedMs(elapsedMs)}/${fmtTotalMs(totalMs)}` : fmtElapsedMs(elapsedMs);
+}
+
+function jobTotalMs(job: BgJob): number | undefined {
+	return job.deadlineAt !== undefined ? job.deadlineAt - job.startedAt : undefined;
+}
+
+function liveJobs(): BgJob[] {
+	return [...registry().jobs.values()]
+		.filter((j) => j.state === "running" || j.state === "stopping")
+		.sort((a, b) => a.startedAt - b.startedAt);
+}
+
+// The footer is the live signal: running/stopping jobs only, refreshed on
+// the poller's own tick, cleared the moment nothing is pending. A settled
+// job waiting on delivery is no longer "taking time" and drops out.
+function refreshStatus(): void {
+	if (!ui) return;
+	const live = liveJobs();
+	if (live.length === 0) {
+		ui.setStatus(STATUS_KEY, undefined);
+		return;
+	}
+	const parts = live.map((j) => `${j.id} ${timerField(Date.now() - j.startedAt, jobTotalMs(j))}`);
+	ui.setStatus(STATUS_KEY, ui.theme.fg("dim", parts.join(", ")));
 }
 
 function timeoutSeconds(job: BgJob): number {
@@ -423,6 +481,7 @@ function pollTick(): void {
 		(job) => job.state === "running" || job.state === "stopping" || !job.notified,
 	);
 	if (!pending) stopPoller();
+	refreshStatus();
 }
 
 // A reload re-runs the factory against the same registry: drop this module
@@ -511,26 +570,71 @@ export default function (handle: ExtensionAPI) {
 			};
 		},
 	});
-	handle.on("session_start", async (event) => {
+	handle.registerCommand("bg", {
+		description: "List background commands this session started, with live timers (snapshot card in the transcript; no model context)",
+		handler: async () => {
+			// The card is a record of the check: custom entries never enter LLM
+			// context, and the snapshot stays honest in scrollback and on disk.
+			pi?.appendEntry("bash-bg-status", {
+				at: new Date().toISOString(),
+				jobs: liveJobs().map((j) => ({
+					id: j.id,
+					elapsedMs: Date.now() - j.startedAt,
+					timeoutMs: jobTotalMs(j),
+					command: cardCommand(j.command),
+					logPath: j.logPath,
+				})),
+			});
+		},
+	});
+	handle.registerEntryRenderer("bash-bg-status", (entry, _opts, theme) => {
+		const data = entry.data as {
+			at: string;
+			jobs: { id: string; elapsedMs: number; timeoutMs?: number; command: string }[];
+		};
+		const time = new Date(data.at).toLocaleTimeString();
+		// One Text for the whole card: a Text per line renders paddingY's blank
+		// line between jobs.
+		const lines = [theme.fg("dim", `background jobs — checked ${time}`)];
+		if (data.jobs.length === 0) lines.push(theme.fg("dim", "none running"));
+		for (const j of data.jobs) {
+			lines.push(
+				theme.fg("accent", j.id) +
+					theme.fg("dim", `  ${timerField(j.elapsedMs, j.timeoutMs).padStart(8)}`) +
+					theme.fg("muted", `  ${j.command}`),
+			);
+		}
+		const box = new Box(1, 0, (text) => text);
+		box.addChild(new Text(lines.join("\n"), 0, 0));
+		return box;
+	});
+	handle.on("session_start", async (event, ctx) => {
 		// A replaced session (new/resume/fork) never adopts the old session's
 		// jobs; a reload takes them over. Awaited cleanup here is
 		// belt-and-braces for a shutdown that did not run.
+		// Headless modes (and the stub suite) carry no ui; the footer needs one.
+		if (ctx?.ui && ctx.hasUI !== false) ui = ctx.ui as unknown as UiLike;
 		if (event.reason !== "reload" && event.reason !== "startup") {
 			await stopAllJobs();
 			registry().jobs.clear();
 			stopPoller();
 		}
 		attach(handle);
+		refreshStatus();
 	});
 	handle.on("session_shutdown", async (event) => {
 		if (event.reason === "reload") {
 			// Jobs keep running; this instance's handle must never deliver again.
+			// ui stays: this copy's pollTick keeps the footer honest until the
+			// replacement instance attaches.
 			pi = undefined;
 			return;
 		}
 		await stopAllJobs();
 		registry().jobs.clear();
 		stopPoller();
+		ui?.setStatus(STATUS_KEY, undefined);
+		ui = undefined;
 		pi = undefined;
 	});
 }

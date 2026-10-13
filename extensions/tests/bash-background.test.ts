@@ -311,3 +311,86 @@ test("deadline delivery reconnects after reload with the timeout cause", async (
 	assert.match(second.sent[0].message.content, /timeout of 1s elapsed/);
 	assert.equal(first.sent.length, 0);
 });
+
+function uiCtx(app) {
+	return { ui: app.ui(), hasUI: true };
+}
+
+function statusTexts(app) {
+	return app.status.filter((s) => s.key === "bash-bg").map((s) => s.text);
+}
+
+test("footer status tracks running jobs and clears when nothing is pending", async () => {
+	const app = fresh();
+	bashBackground(app.handle);
+	await app.emit("session_start", { reason: "startup" }, uiCtx(app));
+	await app.bash().execute("c1", { command: "sleep 4", background: true }, undefined, undefined, testCtx("/tmp"));
+	await waitFor(() => statusTexts(app).some((t) => /^bg-1 \d+s$/.test(t ?? "")), 5000);
+	await waitFor(() => app.sent.length === 1, 10000);
+	await waitFor(() => statusTexts(app).at(-1) === undefined, 5000);
+});
+
+test("timed jobs render elapsed/total in the footer", async () => {
+	const app = fresh();
+	bashBackground(app.handle);
+	await app.emit("session_start", { reason: "startup" }, uiCtx(app));
+	await app.bash().execute("c1", { command: "sleep 30", background: true, timeout: 1 }, undefined, undefined, testCtx("/tmp"));
+	await waitFor(() => statusTexts(app).some((t) => /^bg-1 \d+s\/1s$/.test(t ?? "")), 5000);
+	await waitFor(() => app.sent.length === 1, 10000);
+	await waitFor(() => statusTexts(app).at(-1) === undefined, 5000);
+});
+
+test("/bg appends a snapshot card without model context, then an empty card", async () => {
+	const app = fresh();
+	bashBackground(app.handle);
+	await app.emit("session_start", { reason: "startup" }, uiCtx(app));
+	await app.bash().execute("c1", { command: "sleep 30", background: true }, undefined, undefined, testCtx("/tmp"));
+	await app.bash().execute("c2", { command: "sleep 30", background: true, timeout: 2 }, undefined, undefined, testCtx("/tmp"));
+	await waitFor(() => statusTexts(app).some((t) => (t ?? "").includes("bg-2")), 5000);
+	assert.ok(app.renderers.has("bash-bg-status"), "card renderer registered");
+	await app.bgCommand().handler("", { ui: app.ui() });
+	assert.equal(app.entries.length, 1);
+	const card = app.entries[0];
+	assert.equal(card.customType, "bash-bg-status");
+	assert.ok(card.data.at, "check timestamp recorded");
+	assert.deepEqual(
+		card.data.jobs.map((j) => [j.id, j.command, j.timeoutMs]),
+		[
+			["bg-1", "sleep 30", undefined],
+			["bg-2", "sleep 30", 2000],
+		],
+	);
+	assert.ok(card.data.jobs.every((j) => j.elapsedMs >= 0));
+	await app.bashStop().execute("c3", { id: "bg-1" });
+	await app.bashStop().execute("c4", { id: "bg-2" });
+	await app.bgCommand().handler("", { ui: app.ui() });
+	assert.equal(app.entries.length, 2);
+	assert.deepEqual(app.entries[1].data.jobs, [], "empty check records no jobs");
+	assert.equal(app.sent.length, 0, "stopped jobs deliver no completions");
+});
+
+test("session shutdown stops jobs and clears the footer status", async () => {
+	const app = fresh();
+	bashBackground(app.handle);
+	await app.emit("session_start", { reason: "startup" }, uiCtx(app));
+	await app.bash().execute("c1", { command: "sleep 30", background: true }, undefined, undefined, testCtx("/tmp"));
+	await waitFor(() => statusTexts(app).some((t) => /^bg-1 \d+s$/.test(t ?? "")), 5000);
+	await app.emit("session_shutdown", { reason: "quit" }, uiCtx(app));
+	await waitFor(() => statusTexts(app).at(-1) === undefined, 5000);
+	assert.equal(jobs().length, 0, "registry cleared on shutdown");
+});
+
+test("card commands are capped to a single 80-char line", async () => {
+	const app = fresh();
+	bashBackground(app.handle);
+	await app.emit("session_start", { reason: "startup" }, uiCtx(app));
+	const pad = "a".repeat(180);
+	await app.bash().execute("c1", { command: `sleep 30; echo ${pad}`, background: true }, undefined, undefined, testCtx("/tmp"));
+	await waitFor(() => statusTexts(app).some((t) => /^bg-1 \d+s$/.test(t ?? "")), 5000);
+	await app.bgCommand().handler("", { ui: app.ui() });
+	const command = app.entries[0].data.jobs[0].command;
+	assert.equal(command.length, 80, "77 chars plus the ellipsis");
+	assert.match(command, /^sleep 30; echo a+\.+$/, "capped with an ellipsis");
+	assert.ok(!command.includes("\n"), "newlines collapsed");
+	await app.bashStop().execute("c2", { id: "bg-1" });
+});
