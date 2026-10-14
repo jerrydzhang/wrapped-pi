@@ -1,7 +1,9 @@
 # wrapped-pi
 
-Pinned native Pi with bundled [web search](extensions/websearch.md) and
-[background bash execution](extensions/bash-background.md).
+Pinned native Pi with bundled [web search](extensions/websearch.md),
+[background bash execution](extensions/bash-background.md), and
+[PDF-capable read](extensions/pdf-read.md) (Poppler from the package
+closure; non-PDF reads unchanged).
 
 ## Run
 
@@ -42,6 +44,8 @@ working-tree paths are a development-shell concern, not a release input.
 nix flake check
 node --test extensions/websearch.test.ts
 node --import ./extensions/tests/register.mjs --test extensions/tests/bash-background.test.ts
+node --test extensions/tests/pdf-read.test.ts
+node --test extensions/tests/pdf-read.poppler.test.ts   # real Poppler; skips without it
 ```
 
 The SDK stub loader is specific to the bash suite; do not apply it to websearch.

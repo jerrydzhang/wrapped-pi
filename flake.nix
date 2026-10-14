@@ -28,6 +28,7 @@
     in {
       default = pkgs.callPackage ./nix/package.nix {
         pi = pi.packages.${system}.pi;
+        poppler = pkgs."poppler-utils";
       };
     });
 
@@ -35,12 +36,14 @@
       pkgs = nixpkgs.legacyPackages.${system};
     in {
       extensions = pkgs.runCommand "wrapped-pi-extension-tests" {
-        nativeBuildInputs = [pkgs.nodejs];
+        nativeBuildInputs = [pkgs.nodejs pkgs."poppler-utils"];
       } ''
         cp -R ${./extensions} extensions
         chmod -R u+w extensions
         node --test extensions/websearch.test.ts
         node --import ./extensions/tests/register.mjs --test extensions/tests/bash-background.test.ts
+        node --test extensions/tests/pdf-read.test.ts
+        node --test extensions/tests/pdf-read.poppler.test.ts
         touch "$out"
       '';
     });
@@ -61,6 +64,7 @@
               else toString ./.;
             packages = [
               pkgs.nodejs
+              pkgs."poppler-utils"
               saccade.packages.${system}.default
             ];
 

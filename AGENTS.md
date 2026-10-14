@@ -36,6 +36,8 @@ packaging mechanics.
 nix flake check
 node --test extensions/websearch.test.ts
 node --import ./extensions/tests/register.mjs --test extensions/tests/bash-background.test.ts
+node --test extensions/tests/pdf-read.test.ts
+node --test extensions/tests/pdf-read.poppler.test.ts   # real Poppler; skips without it
 ```
 
 The SDK stub loader belongs to the bash suite only; never apply it to
