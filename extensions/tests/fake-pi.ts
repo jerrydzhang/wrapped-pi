@@ -44,6 +44,7 @@ export function fakePi() {
 		},
 		bash: () => tools.get("bash"),
 		bashStop: () => tools.get("bash_stop"),
+		bashWait: () => tools.get("bash_wait"),
 		bgCommand: () => commands.get("bg"),
 	};
 }

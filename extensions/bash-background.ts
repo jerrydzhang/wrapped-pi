@@ -273,10 +273,13 @@ function jobTotalMs(job: BgJob): number | undefined {
 	return job.deadlineAt !== undefined ? job.deadlineAt - job.startedAt : undefined;
 }
 
+// Live is the wait-relevant sense: a job the session can still see settle.
+function isLive(job: BgJob): boolean {
+	return job.state === "running" || job.state === "stopping";
+}
+
 function liveJobs(): BgJob[] {
-	return [...registry().jobs.values()]
-		.filter((j) => j.state === "running" || j.state === "stopping")
-		.sort((a, b) => a.startedAt - b.startedAt);
+	return [...registry().jobs.values()].filter(isLive).sort((a, b) => a.startedAt - b.startedAt);
 }
 
 // The footer is the live signal: running/stopping jobs only, refreshed on
@@ -357,6 +360,83 @@ function deliver(job: BgJob): void {
 }
 
 const killsInFlight = new Map<string, Promise<string>>();
+
+// ---- bash_wait ----
+//
+// Waiters live in module scope, never in the registry: a reload kills the
+// module copy and its pending tool calls together, and a fresh instance must
+// not inherit promises owned by dead ones. Resolution is state-based — every
+// tick satisfies any registered waiter whose condition already holds — so a
+// job settling outside pollTick (a stop path) can never strand a wait.
+
+type WaitEnd = "settled" | "kill" | "timeout" | "abort";
+
+interface JobWaiter {
+	job: BgJob;
+	resolve: (end: WaitEnd) => void;
+}
+
+interface AllWaiter {
+	resolve: (end: WaitEnd, claimed: BgJob[]) => void;
+}
+
+const jobWaiters = new Set<JobWaiter>();
+const allWaiters = new Set<AllWaiter>();
+
+// Called from pollTick only, between the settle loop and the deliver pass:
+// a wait that can be satisfied claims its completion here (notified set), so
+// deliver() skips it in the same tick — wait wins, the follow-up never
+// duplicates what bash_wait returns.
+function resolveWaiters(): void {
+	for (const waiter of jobWaiters) {
+		if (isLive(waiter.job)) continue;
+		jobWaiters.delete(waiter);
+		waiter.job.notified = true;
+		waiter.resolve("settled");
+	}
+	if (allWaiters.size === 0 || liveJobs().length > 0) return;
+	const claimed = [...registry().jobs.values()].filter((job) => !isLive(job) && !job.notified);
+	for (const job of claimed) job.notified = true;
+	for (const waiter of allWaiters) {
+		allWaiters.delete(waiter);
+		waiter.resolve("settled", claimed);
+	}
+}
+
+// A settled job whose result the model already has in context: outcome and
+// log path only — never a second copy of the tail.
+function deliveredOneLiner(job: BgJob): string {
+	const seconds = Math.round(((job.endedAt ?? Date.now()) - job.startedAt) / 100) / 10;
+	return `${job.id} ${outcome(job)}, ran ${seconds}s — result already delivered. Log: ${job.logPath}`;
+}
+
+// The still-running line: synchronization status only, never an output tail
+// — progress inspection stays a deliberate log read.
+function stillRunningLine(job: BgJob): string {
+	const elapsed = fmtElapsedMs(Date.now() - job.startedAt);
+	const total = jobTotalMs(job);
+	return `${job.id} still running, ${total !== undefined ? `${elapsed} / ${fmtTotalMs(total)}` : elapsed}. Log: ${job.logPath}`;
+}
+
+// The all-wait return: every job this session started, headed per job — the
+// full completion text for the ones this wait claims, a one-liner for results
+// already in context. `claimed` is the authoritative claim set resolveWaiters
+// marked, passed only when the wait ended settled; any other end recomputes —
+// an empty claim from a timeout/abort leg must never read as "nothing was
+// undelivered" while settled-but-undelivered jobs exist.
+function composeAllWait(claimed: BgJob[] | undefined): string {
+	const settled = [...registry().jobs.values()]
+		.filter((job) => !isLive(job))
+		.sort((a, b) => a.startedAt - b.startedAt);
+	const full = claimed ?? settled.filter((job) => !job.notified);
+	for (const job of full) job.notified = true;
+	if (full.length === 0) return "No background commands pending.";
+	return settled.map((job) => (full.includes(job) ? `${job.id}\n${completionText(job)}` : deliveredOneLiner(job))).join("\n\n");
+}
+
+function abortAllText(): string {
+	return ["Wait aborted — jobs untouched, still running:", ...liveJobs().map(stillRunningLine)].join("\n");
+}
 
 function settleFromMarker(job: BgJob): string | undefined {
 	const marker = readMarker(job);
@@ -474,6 +554,10 @@ function pollTick(): void {
 			job.endedAt = Date.now();
 		}
 	}
+	// Waiters claim before the deliver pass: a wait satisfiable this tick
+	// marks its job notified here, so deliver() never duplicates what the
+	// wait returns — wait wins in the same tick.
+	resolveWaiters();
 	for (const job of reg.jobs.values()) {
 		deliver(job);
 	}
@@ -493,7 +577,7 @@ function attach(handle: ExtensionAPI): void {
 }
 
 const BACKGROUND_CONTRACT =
-	"Set background:true to run a command detached and continue other work: the call returns at once with a job id and a log path, and the result is delivered to you automatically as a follow-up message when the command finishes — do not poll or sleep-wait; read the log anytime for progress (reading never consumes the result). timeout, if set, limits total runtime including time in the background. Stop a running background command with bash_stop.";
+	"Set background:true to run a command detached and continue other work: the call returns at once with a job id and a log path, and the result is delivered to you automatically as a follow-up message when the command finishes — do not poll or sleep-wait. bash_wait returns a background command's result in this turn and no follow-up fires for a job it returns; the log is for progress while the job runs. timeout, if set, limits total runtime including time in the background. Stop a running background command with bash_stop.";
 
 export default function (handle: ExtensionAPI) {
 	// Bound at factory time, not only at session_start: a completion may land
@@ -525,9 +609,9 @@ export default function (handle: ExtensionAPI) {
 						text: [
 							`Background command ${job.id} started (pid ${job.pid}).`,
 							`Command: ${oneLine(input.command)}`,
-							`Output streams to ${job.logPath} — read it anytime for progress; reading never consumes the result.`,
+							`Output streams to ${job.logPath} — read it anytime for progress while the job runs.`,
 							job.deadlineAt !== undefined ? `Deadline: ${input.timeout}s total runtime.` : "No deadline.",
-							"The result will be delivered here automatically when it finishes — continue other work instead of polling.",
+							"The result will be delivered here automatically when it finishes, or returned in-turn by bash_wait — continue other work instead of polling.",
 						].join("\n"),
 					},
 				],
@@ -568,6 +652,206 @@ export default function (handle: ExtensionAPI) {
 				content: [{ type: "text", text: `${job.id} ${how}.` }],
 				details: { id: job.id, state: job.state, outcome: how },
 			};
+		},
+	});
+	handle.registerTool({
+		name: "bash_wait",
+		label: "Wait for background command",
+		description:
+			"Wait for a background command (bash with background:true) this session started and get its result in this turn: the completion that would have arrived as a follow-up message is returned by this call instead — no follow-up fires for a job bash_wait returns. Give id (bg-N) to wait for one job, or all: true to wait until no background command is still running; jobs whose results were already delivered get a one-line pointer. timeout (seconds) bounds the wait; on expiry each still-running job gets one line with its log path, never an output tail. Aborting the call ends the wait only — the job keeps running.",
+		parameters: Type.Object({
+			id: Type.Optional(Type.String({ description: "Job id returned by a background bash call, e.g. bg-1" })),
+			all: Type.Optional(Type.Boolean({ description: "Wait until no background command from this session is still running" })),
+			timeout: Type.Optional(Type.Number({ description: "Maximum seconds to wait; omitted means no deadline" })),
+		}),
+		async execute(_toolCallId, params, signal) {
+			const input = params as { id?: string; all?: boolean; timeout?: number };
+			if (input.id !== undefined && input.all === true) {
+				throw new Error("Give either id or all, not both.");
+			}
+			if (input.id === undefined && input.all !== true) {
+				throw new Error("Give id (a bg-N job id) or all: true.");
+			}
+			validateTimeout(input.timeout);
+			const deadline = input.timeout !== undefined ? Date.now() + input.timeout * 1000 : undefined;
+
+			if (input.id !== undefined) {
+				const job = registry().jobs.get(input.id);
+				if (!job) {
+					return {
+						content: [
+							{ type: "text", text: `No background command ${input.id} in this session. Only commands started here can be waited on.` },
+						],
+					details: { id: input.id, found: false },
+					};
+				}
+				// Already settled: the full completion text if the follow-up never
+				// fired, a one-line pointer if it did (the model has it in
+				// context). Synchronous — no tick can deliver in between.
+				if (!isLive(job)) {
+					if (job.notified) {
+						return {
+							content: [{ type: "text", text: deliveredOneLiner(job) }],
+							details: { id: job.id, state: job.state, delivered: true },
+						};
+					}
+					job.notified = true;
+					return {
+						content: [{ type: "text", text: completionText(job) }],
+						details: { id: job.id, state: job.state, exitCode: job.exitCode ?? null, logPath: job.logPath },
+					};
+				}
+				if (signal?.aborted) {
+					return {
+						content: [{ type: "text", text: `Wait aborted — ${job.id} still running, untouched. Log: ${job.logPath}` }],
+						details: { id: job.id, aborted: true },
+					};
+				}
+				// Register synchronously — before any await — so a pollTick firing
+				// between this call and registration cannot strand the wait.
+				const waiter: JobWaiter = { job, resolve: () => {} };
+				const settleP = new Promise<WaitEnd>((resolve) => {
+					waiter.resolve = resolve;
+				});
+				jobWaiters.add(waiter);
+				const onAbort = (): void => waiter.resolve("abort");
+				let timer: ReturnType<typeof setTimeout> | undefined;
+				try {
+					let end: WaitEnd = "settled";
+					for (;;) {
+						// A stop already in flight is awaited through its shared
+						// promise, not a second watcher path.
+						const kill = killsInFlight.get(job.id);
+						if (deadline !== undefined) {
+							const remaining = deadline - Date.now();
+							if (remaining <= 0) {
+								end = "timeout";
+								break;
+							}
+							timer = setTimeout(() => waiter.resolve("timeout"), remaining);
+						}
+						signal?.addEventListener("abort", onAbort, { once: true });
+						const legs: Promise<WaitEnd>[] = [settleP];
+						if (kill !== undefined) legs.push(kill.then((): WaitEnd => "kill"));
+						end = await Promise.race(legs);
+						clearTimeout(timer);
+						timer = undefined;
+						signal?.removeEventListener("abort", onAbort);
+						// A stop can end unresolved (the group survived); the job is
+						// still live and the waiter still registered — wait on.
+						if (end === "kill" && isLive(job)) continue;
+						break;
+					}
+					// Compose from state, not from the winning leg: a job that
+					// settled as the wait ended must not lose its completion.
+					if (!isLive(job)) {
+						if (end !== "settled" && job.notified) {
+							return {
+								content: [{ type: "text", text: deliveredOneLiner(job) }],
+								details: { id: job.id, state: job.state, delivered: true },
+							};
+						}
+						// The wait claims the completion: resolveWaiters already marked
+						// it, or an out-of-band settle is marked here.
+						job.notified = true;
+						return {
+							content: [{ type: "text", text: completionText(job) }],
+							details: { id: job.id, state: job.state, exitCode: job.exitCode ?? null, logPath: job.logPath },
+						};
+					}
+					if (end === "timeout") {
+						return {
+							content: [{ type: "text", text: stillRunningLine(job) }],
+							details: { id: job.id, stillRunning: true },
+						};
+					}
+					return {
+						content: [{ type: "text", text: `Wait aborted — ${job.id} still running, untouched. Log: ${job.logPath}` }],
+						details: { id: job.id, aborted: true },
+					};
+				} finally {
+					jobWaiters.delete(waiter);
+					if (timer !== undefined) clearTimeout(timer);
+					signal?.removeEventListener("abort", onAbort);
+				}
+			}
+
+			// all: true — resolve when no live job remains; settled-but-undelivered
+			// jobs contribute their texts, everything else a one-liner.
+			if (liveJobs().length === 0) {
+				return { content: [{ type: "text", text: composeAllWait(undefined) }], details: { all: true, pending: 0 } };
+			}
+			if (signal?.aborted) {
+				return { content: [{ type: "text", text: abortAllText() }], details: { all: true, aborted: true } };
+			}
+			let claimed: BgJob[] | undefined;
+			const allWaiter: AllWaiter = { resolve: () => {} };
+			const allSettleP = new Promise<WaitEnd>((resolve) => {
+				let ended = false;
+				allWaiter.resolve = (end, jobs) => {
+					// First end wins: a late abort firing after resolveWaiters
+					// claimed must not overwrite the claim.
+					if (ended) return;
+					ended = true;
+					claimed = jobs;
+					resolve(end);
+				};
+			});
+			allWaiters.add(allWaiter);
+			const onAllAbort = (): void => allWaiter.resolve("abort", []);
+			let allTimer: ReturnType<typeof setTimeout> | undefined;
+			try {
+				let end: WaitEnd = "settled";
+				for (;;) {
+					const kills = [
+						...new Set(
+							liveJobs()
+								.map((j) => killsInFlight.get(j.id))
+								.filter((k): k is Promise<string> => k !== undefined),
+						),
+					];
+					if (deadline !== undefined) {
+						const remaining = deadline - Date.now();
+						if (remaining <= 0) {
+							end = "timeout";
+							break;
+						}
+						allTimer = setTimeout(() => allWaiter.resolve("timeout", []), remaining);
+					}
+					signal?.addEventListener("abort", onAllAbort, { once: true });
+					const legs: Promise<WaitEnd>[] = [
+						allSettleP,
+						...kills.map((k) => k.then((): WaitEnd => "kill")),
+					];
+					end = await Promise.race(legs);
+					clearTimeout(allTimer);
+					allTimer = undefined;
+					signal?.removeEventListener("abort", onAllAbort);
+					if (end === "kill" && liveJobs().length > 0) continue;
+					break;
+				}
+				if (liveJobs().length === 0) {
+					// Trust resolveWaiters' claim only for a settled end: the
+					// timeout/abort legs carry an empty claim, which must not mask
+					// undelivered jobs — recompute from state instead.
+					return {
+						content: [{ type: "text", text: composeAllWait(end === "settled" ? claimed : undefined) }],
+						details: { all: true },
+					};
+				}
+				if (end === "timeout") {
+					const live = liveJobs();
+					return {
+						content: [{ type: "text", text: live.map(stillRunningLine).join("\n") }],
+						details: { all: true, stillRunning: live.length },
+					};
+				}
+				return { content: [{ type: "text", text: abortAllText() }], details: { all: true, aborted: true } };
+			} finally {
+				allWaiters.delete(allWaiter);
+				if (allTimer !== undefined) clearTimeout(allTimer);
+				signal?.removeEventListener("abort", onAllAbort);
+			}
 		},
 	});
 	handle.registerCommand("bg", {
@@ -626,7 +910,11 @@ export default function (handle: ExtensionAPI) {
 		if (event.reason === "reload") {
 			// Jobs keep running; this instance's handle must never deliver again.
 			// ui stays: this copy's pollTick keeps the footer honest until the
-			// replacement instance attaches.
+			// replacement instance attaches. Pending waits die with this module
+			// copy — dropping the waiter sets keeps its last ticks from claiming
+			// a completion (notified) that only a live caller could ever return.
+			jobWaiters.clear();
+			allWaiters.clear();
 			pi = undefined;
 			return;
 		}
