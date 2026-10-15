@@ -62,7 +62,7 @@ function fakePdfinfo(pages: number): Handler {
 }
 
 // pdftotext fake: echoes the CURRENT bytes of the selected pdf path as the
-// extraction, one identical \f-terminated chunk per requested page — poppler
+// extraction, one identical \f-terminated chunk per requested page - poppler
 // reads current contents, and so does the fake.
 function echoingPdftotext(): Handler {
 	return (args) => {
@@ -189,7 +189,7 @@ test("non-PDF reads delegate unchanged to the builtin with original params and c
 	assert.equal(builtinCalls[0].toolCallId, "call-1");
 	assert.deepEqual(builtinCalls[0].params, { path: file, offset: 2, limit: 5 });
 	assert.equal(builtinCalls[0].ctx, ctx);
-	assert.equal(outcome, builtinResult); // identity passthrough — unchanged
+	assert.equal(outcome, builtinResult); // identity passthrough - unchanged
 	await rm(dir, { recursive: true, force: true });
 });
 
@@ -218,10 +218,10 @@ test("PDF detection is by content, not extension", async () => {
 	await writeFile(lying, "just text, no magic bytes anywhere in here at all");
 
 	const { deps } = makeDeps({ pages: 1, pdftotext: () => "hello\f" });
-	// real.pdf: %PDF- within the first KB → poppler path
+	// real.pdf: %PDF- within the first KB -> poppler path
 	const pdfOutcome = await runReadPdf({ path: realPdf }, { ...deps, ctx: { cwd: dir } });
 	assert.match((pdfOutcome.content[0] as { text: string }).text, /hello/);
-	// lying.pdf: no magic → delegation, despite the .pdf extension
+	// lying.pdf: no magic -> delegation, despite the .pdf extension
 	let delegated = 0;
 	await executeRead("c", { path: lying }, undefined, undefined, { cwd: dir }, {
 		builtinRead: async () => {
@@ -245,7 +245,7 @@ test("text mode labels physical pages, preserves form feeds, provenance holds", 
 	});
 	const outcome = await runReadPdf({ path: pdf }, { ...deps, ctx: { cwd: dir } });
 	const text = (outcome.content[0] as { text: string }).text;
-	assert.match(text, /^\[PDF text: paper\.pdf \(3 physical pages\) — extracting pages 1-3\]/);
+	assert.match(text, /^\[PDF text: paper\.pdf \(3 physical pages\) - extracting pages 1-3\]/);
 	assert.match(text, /--- PDF page 1 ---\nalpha page one/);
 	assert.match(text, /--- PDF page 2 ---\nbeta page two/);
 	assert.match(text, /--- PDF page 3 ---\ngamma page three/);
@@ -464,7 +464,7 @@ test("renders past every dpi bound are skipped, never silently oversized", async
 	const outcome = await runReadPdf({ path: pdf, pages: "1-2", mode: "image" }, { ...deps, ctx: { cwd: dir } });
 	const header = (outcome.content[0] as { text: string }).text;
 	assert.match(header, /Rendered 0 PDF pages from huge\.pdf at 130 dpi \(PNG\): none\./);
-	assert.match(header, /page 1 skipped — PNG exceeds .* even at 80 dpi/);
+	assert.match(header, /page 1 skipped - PNG exceeds .* even at 80 dpi/);
 	assert.equal(outcome.content.filter((b: ContentBlock) => b.type === "image").length, 0);
 	assert.equal((await readdir(tmpRoot)).length, 0);
 	await rm(dir, { recursive: true, force: true });
@@ -647,7 +647,7 @@ test("default whole-PDF read succeeds when a model null-fills optional fields", 
 	await rm(dir, { recursive: true, force: true });
 });
 
-test("garbage optional values still fail specifically — no blanket acceptance", async () => {
+test("garbage optional values still fail specifically - no blanket acceptance", async () => {
 	const dir = await makeTempDir("garbage");
 	const pdf = join(dir, "g.pdf");
 	await writeFile(pdf, "x");
@@ -764,7 +764,7 @@ test("a real PDF must still be detected: magic anchored at offset 0", async () =
 	const pdf = join(dir, "real.pdf");
 	await writeFile(pdf, Buffer.concat([Buffer.from("%PDF-1.6\n"), Buffer.alloc(64, 0x20)]));
 	assert.equal(await isPdfFile(pdf), true);
-	// junk before the header is NOT a PDF claim — delegated (documented trade-off)
+	// junk before the header is NOT a PDF claim - delegated (documented trade-off)
 	const junky = join(dir, "junky.pdf");
 	await writeFile(junky, Buffer.concat([Buffer.from("leading junk bytes\n"), Buffer.from("%PDF-1.6\n"), Buffer.alloc(64, 0x20)]));
 	assert.equal(await isPdfFile(junky), false);

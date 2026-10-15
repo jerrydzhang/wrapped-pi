@@ -59,7 +59,7 @@ interface Registry {
 	poller?: ReturnType<typeof setInterval>;
 }
 
-// On globalThis because pi reloads extensions with moduleCache: false — module
+// On globalThis because pi reloads extensions with moduleCache: false - module
 // state dies on /reload, this survives it within the same process.
 const REGISTRY_KEY = Symbol.for("bash-background.jobs");
 
@@ -81,7 +81,7 @@ const STATUS_KEY = "bash-bg";
 
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
-// EPERM on a probe means the target exists but cannot be signalled —
+// EPERM on a probe means the target exists but cannot be signalled;
 // existence, never absence; only ESRCH settles liveness.
 function probeAlive(pid: number, group: boolean): boolean {
 	try {
@@ -324,9 +324,9 @@ function completionText(job: BgJob): string {
 		`Background command ${job.id} ${outcome(job)}, ran ${seconds}s.`,
 		`Command: ${oneLine(job.command)}`,
 	];
-	if (text === "") lines.push(cut === "bytes" ? `Earlier output was cut — full output: ${job.logPath}` : "(no output)");
-	else if (cut === "bytes") lines.push(`Output (tail; earlier output cut) — full output: ${job.logPath}`, text);
-	else if (cut === "lines") lines.push(`Output, last ${TAIL_LINES} lines — full output: ${job.logPath}`, text);
+	if (text === "") lines.push(cut === "bytes" ? `Earlier output was cut - full output: ${job.logPath}` : "(no output)");
+	else if (cut === "bytes") lines.push(`Output (tail; earlier output cut) - full output: ${job.logPath}`, text);
+	else if (cut === "lines") lines.push(`Output, last ${TAIL_LINES} lines - full output: ${job.logPath}`, text);
 	else lines.push("Output:", text, `Full output: ${job.logPath}`);
 	return lines.join("\n");
 }
@@ -365,8 +365,8 @@ const killsInFlight = new Map<string, Promise<string>>();
 //
 // Waiters live in module scope, never in the registry: a reload kills the
 // module copy and its pending tool calls together, and a fresh instance must
-// not inherit promises owned by dead ones. Resolution is state-based — every
-// tick satisfies any registered waiter whose condition already holds — so a
+// not inherit promises owned by dead ones. Resolution is state-based - every
+// tick satisfies any registered waiter whose condition already holds - so a
 // job settling outside pollTick (a stop path) can never strand a wait.
 
 type WaitEnd = "settled" | "kill" | "timeout" | "abort";
@@ -385,7 +385,7 @@ const allWaiters = new Set<AllWaiter>();
 
 // Called from pollTick only, between the settle loop and the deliver pass:
 // a wait that can be satisfied claims its completion here (notified set), so
-// deliver() skips it in the same tick — wait wins, the follow-up never
+// deliver() skips it in the same tick - wait wins, the follow-up never
 // duplicates what bash_wait returns.
 function resolveWaiters(): void {
 	for (const waiter of jobWaiters) {
@@ -404,24 +404,24 @@ function resolveWaiters(): void {
 }
 
 // A settled job whose result the model already has in context: outcome and
-// log path only — never a second copy of the tail.
+// log path only - never a second copy of the tail.
 function deliveredOneLiner(job: BgJob): string {
 	const seconds = Math.round(((job.endedAt ?? Date.now()) - job.startedAt) / 100) / 10;
-	return `${job.id} ${outcome(job)}, ran ${seconds}s — result already delivered. Log: ${job.logPath}`;
+	return `${job.id} ${outcome(job)}, ran ${seconds}s - result already delivered. Log: ${job.logPath}`;
 }
 
 // The still-running line: synchronization status only, never an output tail
-// — progress inspection stays a deliberate log read.
+// - progress inspection stays a deliberate log read.
 function stillRunningLine(job: BgJob): string {
 	const elapsed = fmtElapsedMs(Date.now() - job.startedAt);
 	const total = jobTotalMs(job);
 	return `${job.id} still running, ${total !== undefined ? `${elapsed} / ${fmtTotalMs(total)}` : elapsed}. Log: ${job.logPath}`;
 }
 
-// The all-wait return: every job this session started, headed per job — the
+// The all-wait return: every job this session started, headed per job - the
 // full completion text for the ones this wait claims, a one-liner for results
 // already in context. `claimed` is the authoritative claim set resolveWaiters
-// marked, passed only when the wait ended settled; any other end recomputes —
+// marked, passed only when the wait ended settled; any other end recomputes;
 // an empty claim from a timeout/abort leg must never read as "nothing was
 // undelivered" while settled-but-undelivered jobs exist.
 function composeAllWait(claimed: BgJob[] | undefined): string {
@@ -435,7 +435,7 @@ function composeAllWait(claimed: BgJob[] | undefined): string {
 }
 
 function abortAllText(): string {
-	return ["Wait aborted — jobs untouched, still running:", ...liveJobs().map(stillRunningLine)].join("\n");
+	return ["Wait aborted - jobs untouched, still running:", ...liveJobs().map(stillRunningLine)].join("\n");
 }
 
 function settleFromMarker(job: BgJob): string | undefined {
@@ -453,7 +453,7 @@ function settleFromMarker(job: BgJob): string | undefined {
 }
 
 // Returns the observed outcome; the caller words it. Terminal only when
-// settlement was actually observed — an unkillable group stays running.
+// settlement was actually observed - an unkillable group stays running.
 async function stopJob(job: BgJob, reason: "stopped" | "timeout"): Promise<string> {
 	const existing = killsInFlight.get(job.id);
 	if (existing) return existing;
@@ -462,7 +462,7 @@ async function stopJob(job: BgJob, reason: "stopped" | "timeout"): Promise<strin
 		job.stopReason = reason;
 		// Set before the kill so an explicitly stopped command can never
 		// deliver afterwards; the stop result itself carries the outcome. A
-		// deadline stop keeps delivering — with its cause preserved.
+		// deadline stop keeps delivering - with its cause preserved.
 		if (reason === "stopped") job.notified = true;
 		const settled = settleFromMarker(job);
 		if (settled !== undefined) return settled;
@@ -556,7 +556,7 @@ function pollTick(): void {
 	}
 	// Waiters claim before the deliver pass: a wait satisfiable this tick
 	// marks its job notified here, so deliver() never duplicates what the
-	// wait returns — wait wins in the same tick.
+	// wait returns - wait wins in the same tick.
 	resolveWaiters();
 	for (const job of reg.jobs.values()) {
 		deliver(job);
@@ -577,7 +577,7 @@ function attach(handle: ExtensionAPI): void {
 }
 
 const BACKGROUND_CONTRACT =
-	"Set background:true to run a command detached and continue other work: the call returns at once with a job id and a log path, and the result is delivered to you automatically as a follow-up message when the command finishes — do not poll or sleep-wait. bash_wait returns a background command's result in this turn and no follow-up fires for a job it returns; the log is for progress while the job runs. timeout, if set, limits total runtime including time in the background. Stop a running background command with bash_stop.";
+	"Set background:true to run a command detached and continue other work: the call returns at once with a job id and a log path, and the result is delivered to you automatically as a follow-up message when the command finishes - do not poll or sleep-wait. bash_wait returns a background command's result in this turn and no follow-up fires for a job it returns; the log is for progress while the job runs. timeout, if set, limits total runtime including time in the background. Stop a running background command with bash_stop.";
 
 export default function (handle: ExtensionAPI) {
 	// Bound at factory time, not only at session_start: a completion may land
@@ -609,9 +609,9 @@ export default function (handle: ExtensionAPI) {
 						text: [
 							`Background command ${job.id} started (pid ${job.pid}).`,
 							`Command: ${oneLine(input.command)}`,
-							`Output streams to ${job.logPath} — read it anytime for progress while the job runs.`,
+							`Output streams to ${job.logPath} - read it anytime for progress while the job runs.`,
 							job.deadlineAt !== undefined ? `Deadline: ${input.timeout}s total runtime.` : "No deadline.",
-							"The result will be delivered here automatically when it finishes, or returned in-turn by bash_wait — continue other work instead of polling.",
+							"The result will be delivered here automatically when it finishes, or returned in-turn by bash_wait - continue other work instead of polling.",
 						].join("\n"),
 					},
 				],
@@ -623,7 +623,7 @@ export default function (handle: ExtensionAPI) {
 		name: "bash_stop",
 		label: "Stop background command",
 		description:
-			"Stop a background command (bash with background:true) that this session started, by its job id (bg-N). Terminates the command's whole process group and reports the observed outcome; the stop result is the outcome — no completion message follows for a command you stopped.",
+			"Stop a background command (bash with background:true) that this session started, by its job id (bg-N). Terminates the command's whole process group and reports the observed outcome; the stop result is the outcome - no completion message follows for a command you stopped.",
 		parameters: Type.Object({
 			id: Type.String({ description: "Job id returned by a background bash call, e.g. bg-1" }),
 		}),
@@ -658,7 +658,7 @@ export default function (handle: ExtensionAPI) {
 		name: "bash_wait",
 		label: "Wait for background command",
 		description:
-			"Wait for a background command (bash with background:true) this session started and get its result in this turn: the completion that would have arrived as a follow-up message is returned by this call instead — no follow-up fires for a job bash_wait returns. Give id (bg-N) to wait for one job, or all: true to wait until no background command is still running; jobs whose results were already delivered get a one-line pointer. timeout (seconds) bounds the wait; on expiry each still-running job gets one line with its log path, never an output tail. Aborting the call ends the wait only — the job keeps running.",
+			"Wait for a background command (bash with background:true) this session started and get its result in this turn: the completion that would have arrived as a follow-up message is returned by this call instead - no follow-up fires for a job bash_wait returns. Give id (bg-N) to wait for one job, or all: true to wait until no background command is still running; jobs whose results were already delivered get a one-line pointer. timeout (seconds) bounds the wait; on expiry each still-running job gets one line with its log path, never an output tail. Aborting the call ends the wait only - the job keeps running.",
 		parameters: Type.Object({
 			id: Type.Optional(Type.String({ description: "Job id returned by a background bash call, e.g. bg-1" })),
 			all: Type.Optional(Type.Boolean({ description: "Wait until no background command from this session is still running" })),
@@ -687,7 +687,7 @@ export default function (handle: ExtensionAPI) {
 				}
 				// Already settled: the full completion text if the follow-up never
 				// fired, a one-line pointer if it did (the model has it in
-				// context). Synchronous — no tick can deliver in between.
+				// context). Synchronous - no tick can deliver in between.
 				if (!isLive(job)) {
 					if (job.notified) {
 						return {
@@ -703,11 +703,11 @@ export default function (handle: ExtensionAPI) {
 				}
 				if (signal?.aborted) {
 					return {
-						content: [{ type: "text", text: `Wait aborted — ${job.id} still running, untouched. Log: ${job.logPath}` }],
+						content: [{ type: "text", text: `Wait aborted - ${job.id} still running, untouched. Log: ${job.logPath}` }],
 						details: { id: job.id, aborted: true },
 					};
 				}
-				// Register synchronously — before any await — so a pollTick firing
+				// Register synchronously - before any await - so a pollTick firing
 				// between this call and registration cannot strand the wait.
 				const waiter: JobWaiter = { job, resolve: () => {} };
 				const settleP = new Promise<WaitEnd>((resolve) => {
@@ -738,7 +738,7 @@ export default function (handle: ExtensionAPI) {
 						timer = undefined;
 						signal?.removeEventListener("abort", onAbort);
 						// A stop can end unresolved (the group survived); the job is
-						// still live and the waiter still registered — wait on.
+						// still live and the waiter still registered - wait on.
 						if (end === "kill" && isLive(job)) continue;
 						break;
 					}
@@ -766,7 +766,7 @@ export default function (handle: ExtensionAPI) {
 						};
 					}
 					return {
-						content: [{ type: "text", text: `Wait aborted — ${job.id} still running, untouched. Log: ${job.logPath}` }],
+						content: [{ type: "text", text: `Wait aborted - ${job.id} still running, untouched. Log: ${job.logPath}` }],
 						details: { id: job.id, aborted: true },
 					};
 				} finally {
@@ -776,7 +776,7 @@ export default function (handle: ExtensionAPI) {
 				}
 			}
 
-			// all: true — resolve when no live job remains; settled-but-undelivered
+			// all: true - resolve when no live job remains; settled-but-undelivered
 			// jobs contribute their texts, everything else a one-liner.
 			if (liveJobs().length === 0) {
 				return { content: [{ type: "text", text: composeAllWait(undefined) }], details: { all: true, pending: 0 } };
@@ -833,7 +833,7 @@ export default function (handle: ExtensionAPI) {
 				if (liveJobs().length === 0) {
 					// Trust resolveWaiters' claim only for a settled end: the
 					// timeout/abort legs carry an empty claim, which must not mask
-					// undelivered jobs — recompute from state instead.
+					// undelivered jobs - recompute from state instead.
 					return {
 						content: [{ type: "text", text: composeAllWait(end === "settled" ? claimed : undefined) }],
 						details: { all: true },
@@ -879,7 +879,7 @@ export default function (handle: ExtensionAPI) {
 		const time = new Date(data.at).toLocaleTimeString();
 		// One Text for the whole card: a Text per line renders paddingY's blank
 		// line between jobs.
-		const lines = [theme.fg("dim", `background jobs — checked ${time}`)];
+		const lines = [theme.fg("dim", `background jobs - checked ${time}`)];
 		if (data.jobs.length === 0) lines.push(theme.fg("dim", "none running"));
 		for (const j of data.jobs) {
 			lines.push(
@@ -911,7 +911,7 @@ export default function (handle: ExtensionAPI) {
 			// Jobs keep running; this instance's handle must never deliver again.
 			// ui stays: this copy's pollTick keeps the footer honest until the
 			// replacement instance attaches. Pending waits die with this module
-			// copy — dropping the waiter sets keeps its last ticks from claiming
+			// copy - dropping the waiter sets keeps its last ticks from claiming
 			// a completion (notified) that only a live caller could ever return.
 			jobWaiters.clear();
 			allWaiters.clear();

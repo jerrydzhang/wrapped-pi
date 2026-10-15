@@ -1,5 +1,5 @@
 // Runs with: node --test extensions/tests/pdf-read.poppler.test.ts
-// Real Poppler against probe PDFs generated in a temp dir at run time —
+// Real Poppler against probe PDFs generated in a temp dir at run time  -
 // no papers are tracked in the repo and nothing is uploaded. Skips
 // gracefully when poppler-utils is not on PATH (nix flake check runs it
 // with poppler_utils in nativeBuildInputs).
@@ -75,7 +75,7 @@ if (!havePoppler) {
 	// --- regressions for review findings 1 and 4 (anchored detection, limit footer) ---
 
 	test("anchored detection: the extension source mentions %PDF- yet delegates", async () => {
-		// executeRead (the real PDF-branch decision) on the extension's own source —
+		// executeRead (the real PDF-branch decision) on the extension's own source  -
 		// substring sniffing misrouted this file to Poppler.
 		const sourcePath = fileURLToPath(new URL("../pdf-read.ts", import.meta.url));
 		const head = (await readFile(sourcePath)).subarray(0, 1024);
@@ -135,7 +135,7 @@ if (!havePoppler) {
 		]));
 		const outcome = await runReadPdf({ path: pdf }, { ctx: { cwd: dir } });
 		const text = textOf(outcome);
-		assert.match(text, /^\[PDF text: probe\.pdf \(3 physical pages\) — extracting pages 1-3\]/);
+		assert.match(text, /^\[PDF text: probe\.pdf \(3 physical pages\) - extracting pages 1-3\]/);
 		assert.match(text, /--- PDF page 1 ---\n.*alpha beta gamma/);
 		assert.match(text, /--- PDF page 2 ---\n.*delta epsilon/);
 		assert.match(text, /--- PDF page 3 ---\n.*zeta eta theta/);

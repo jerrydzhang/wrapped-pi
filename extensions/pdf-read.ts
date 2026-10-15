@@ -1,7 +1,7 @@
 // Independently authored for pinned Pi 1.2.0; only the default factory is pi-facing.
 //
 // Extends the read tool with local PDF support: text extraction via pdftotext,
-// full-page PNG renders via pdftoppm, page metadata via pdfinfo — all from
+// full-page PNG renders via pdftoppm, page metadata via pdfinfo - all from
 // poppler-utils. Non-PDF reads delegate unchanged to the SDK's built-in read
 // definition (dynamic import; the release wrapper pins the poppler path via
 // WRAPPED_PI_POPPLER_BIN, development falls back to PATH).
@@ -135,7 +135,7 @@ export async function isPdfFile(absolutePath: string): Promise<boolean> {
 		handle = await open(absolutePath, "r");
 		const info = await handle.stat();
 		if (!info.isFile()) return false;
-		// Bounded sniff: read exactly the first KiB via the handle — never the
+		// Bounded sniff: read exactly the first KiB via the handle - never the
 		// whole file (a 128MiB input must not allocate 128MiB to classify).
 		const header = Buffer.alloc(SNIFF_BYTES);
 		const { bytesRead } = await handle.read(header, 0, SNIFF_BYTES, 0);
@@ -163,12 +163,12 @@ export function parsePageSelection(spec: string): Array<[number, number]> {
 		const piece = part.trim();
 		const range = piece.match(/^(\d+)(?:\s*-\s*(\d+))?$/);
 		if (!range) {
-			throw new PdfReadError(`invalid page selection "${piece}" — use 1-indexed physical pages like "3", "2-5" or "1,4-6"`);
+			throw new PdfReadError(`invalid page selection "${piece}" - use 1-indexed physical pages like "3", "2-5" or "1,4-6"`);
 		}
 		const start = Number(range[1]);
 		const end = range[2] !== undefined ? Number(range[2]) : start;
-		if (start < 1) throw new PdfReadError(`pages are 1-indexed — "${piece}" is not a valid selection`);
-		if (end < start) throw new PdfReadError(`invalid range "${piece}" — start must not exceed end`);
+		if (start < 1) throw new PdfReadError(`pages are 1-indexed - "${piece}" is not a valid selection`);
+		if (end < start) throw new PdfReadError(`invalid range "${piece}" - start must not exceed end`);
 		runs.push([start, end]);
 	}
 	return runs;
@@ -184,7 +184,7 @@ export function describeRuns(runs: Array<[number, number]>): string {
 
 export function resolvePopplerTool(tool: string, env?: Record<string, string | undefined>): string {
 	const binDir = (env ?? process.env).WRAPPED_PI_POPPLER_BIN;
-	// Release: absolute store path exported by the wrapper — host PATH is never consulted.
+	// Release: absolute store path exported by the wrapper - host PATH is never consulted.
 	// Development: bare name resolved from PATH.
 	return binDir ? join(binDir, tool) : tool;
 }
@@ -222,7 +222,7 @@ export function defaultPopplerExec(
 function stderrTail(err: unknown, limit = 300): string {
 	const source = err instanceof Error ? `${err.message}\n${(err as Error & { stderr?: string }).stderr ?? ""}` : String(err);
 	const tail = source.trim().split("\n").slice(-6).join(" | ");
-	return tail.length > limit ? tail.slice(0, limit) + "…" : tail;
+	return tail.length > limit ? tail.slice(0, limit) + "..." : tail;
 }
 
 function mapPopplerError(err: unknown, tool: string, program: string): PdfReadError {
@@ -235,7 +235,7 @@ function mapPopplerError(err: unknown, tool: string, program: string): PdfReadEr
 	}
 	const text = `${(err as Error)?.message ?? ""} ${(err as Error & { stderr?: string })?.stderr ?? ""}`;
 	if (/incorrect password|encrypted/i.test(text)) {
-		return new PdfReadError("PDF is encrypted — read tool cannot open it. Provide a decrypted copy.");
+		return new PdfReadError("PDF is encrypted - read tool cannot open it. Provide a decrypted copy.");
 	}
 	if (/may not be a pdf file|couldn't open file|not a pdf|couldn't read xref|couldn't find trailer/i.test(text)) {
 		return new PdfReadError(`not a valid PDF, or the file is corrupt (poppler: ${stderrTail(err)})`);
@@ -332,7 +332,7 @@ interface PdfTextPage {
 async function pdfPageCount(absolutePath: string, deps: PdfReadDeps): Promise<number> {
 	const info = await runPoppler("pdfinfo", [absolutePath], { timeoutMs: PDFINFO_TIMEOUT_MS, signal: deps.signal }, deps);
 	const match = info.stdout.match(/^Pages:\s+(\d+)\s*$/m);
-	if (!match) throw new PdfReadError(`could not determine the page count — the PDF may be corrupt (pdfinfo: ${stderrTail(info.stderr || info.stdout)})`);
+	if (!match) throw new PdfReadError(`could not determine the page count - the PDF may be corrupt (pdfinfo: ${stderrTail(info.stderr || info.stdout)})`);
 	return Number(match[1]);
 }
 
@@ -353,7 +353,7 @@ async function extractRun(
 
 function splitRunPages(stdout: string, expectedPages: number, firstPage: number): PdfTextPage[] {
 	// pdftotext ends every page with a form feed; the split length is a
-	// provenance check — never map text to the wrong physical page silently.
+	// provenance check - never map text to the wrong physical page silently.
 	const chunks = stdout.split("\f");
 	if (chunks[chunks.length - 1] === "") chunks.pop();
 	if (chunks.length !== expectedPages) {
@@ -403,23 +403,23 @@ export async function readPdfText(
 		.map((p) => p.page);
 	const totalChars = pages.reduce((sum, p) => sum + p.text.replace(/\s+/g, "").length, 0);
 
-	const header: string[] = [`[PDF text: ${name} (${pageCount} physical page${pageCount === 1 ? "" : "s"}) — extracting pages ${desc}]`];
+	const header: string[] = [`[PDF text: ${name} (${pageCount} physical page${pageCount === 1 ? "" : "s"}) - extracting pages ${desc}]`];
 	if (totalChars === 0) {
 		header.push(
-			`[PDF: no extractable text layer on the selected pages — likely scanned images or pure figures. ` +
+			`[PDF: no extractable text layer on the selected pages - likely scanned images or pure figures. ` +
 				`Use mode:"image" to view the pages visually.]`,
 		);
 	} else {
 		if (emptyPages.length > 0) {
 			header.push(
-				`[PDF: no extractable text on page${emptyPages.length === 1 ? "" : "s"} ${emptyPages.join(", ")} — ` +
+				`[PDF: no extractable text on page${emptyPages.length === 1 ? "" : "s"} ${emptyPages.join(", ")} - ` +
 					`consider mode:"image" for those pages]`,
 			);
 		}
 		if (thinPages.length > 0) {
 			header.push(
 				`[PDF: very thin text on page${thinPages.length === 1 ? "" : "s"} ${thinPages.join(", ")} ` +
-					`(< ${THIN_TEXT_CHARS_PER_PAGE} characters) — text extraction is unreliable for figures, math or tables; ` +
+					`(< ${THIN_TEXT_CHARS_PER_PAGE} characters) - text extraction is unreliable for figures, math or tables; ` +
 					`consider mode:"image"]`,
 			);
 		}
@@ -436,7 +436,7 @@ export async function readPdfText(
 	const allLines = assembled.split("\n");
 	const totalLines = allLines.length;
 	// Models mean "from the start" with offset 0 (run-3 consistency evidence);
-	// native delegation absorbs it, so the PDF path does too — only negatives
+	// native delegation absorbs it, so the PDF path does too - only negatives
 	// and non-numbers are malformed.
 	if (params.offset !== undefined && (!Number.isFinite(params.offset) || (params.offset as number) < 0)) {
 		throw new PdfReadError("offset must be 0 or a positive line number (line 1 is the start)");
@@ -453,7 +453,7 @@ export async function readPdfText(
 			throw new PdfReadError("limit must be a positive number of lines");
 		}
 		if (requested >= 1) {
-			// limit 0 means "no limit intended" (model evidence) — treated as absent,
+			// limit 0 means "no limit intended" (model evidence) - treated as absent,
 			// never as an empty selection.
 			userLimitedLines = Math.min(Math.floor(requested), totalLines - startLine);
 			selection = allLines.slice(startLine, startLine + userLimitedLines).join("\n");
@@ -480,7 +480,7 @@ export async function readPdfText(
 				: `\n\n[Showing lines ${startLine + 1}-${endLine} of ${totalLines} (${formatSize(truncation.maxBytes ?? OUTPUT_MAX_BYTES)} limit). Use offset=${endLine + 1} to continue.]`;
 	} else if (userLimitedLines !== undefined && startLine + userLimitedLines < totalLines) {
 		// A user limit that stops before the end gets the native continuation
-		// guidance too — remaining lines are never silently dropped.
+		// guidance too - remaining lines are never silently dropped.
 		const remaining = totalLines - (startLine + userLimitedLines);
 		const nextOffset = startLine + userLimitedLines + 1;
 		outputText = `${truncation.content}\n\n[${remaining} more lines in output. Use offset=${nextOffset} to continue.]`;
@@ -633,7 +633,7 @@ export async function readPdfImages(
 			`Rendered ${images.length} PDF page${images.length === 1 ? "" : "s"} from ${name} at ${DEFAULT_DPI} dpi (PNG): ` +
 				(images.length > 0 ? describeRuns(mergeContiguous(images.map((i) => i.page))) : "none") + ".",
 			...reduced.map((i) => `[PDF: page ${i.page} rendered at ${i.dpi} dpi (size bound)]`),
-			...skipped.map((s) => `[PDF: page ${s.page} skipped — ${s.reason}]`),
+			...skipped.map((s) => `[PDF: page ${s.page} skipped - ${s.reason}]`),
 			...nonVision,
 		];
 		const note = noteLines.join("\n");
@@ -727,7 +727,7 @@ export async function runReadPdf(params: PdfReadParams, deps: PdfReadDeps): Prom
 	params = normalizeOptionalFields(params);
 	const mode = params.mode ?? "text";
 	if (mode !== "text" && mode !== "image") {
-		throw new PdfReadError(`invalid mode "${String(params.mode)}" — use "text" (default) or "image"`);
+		throw new PdfReadError(`invalid mode "${String(params.mode)}" - use "text" (default) or "image"`);
 	}
 	if (mode === "image" && (params.offset !== undefined || params.limit !== undefined)) {
 		throw new PdfReadError('offset/limit are line-based text pagination and do not apply to mode:"image"');
@@ -747,7 +747,7 @@ export async function runReadPdf(params: PdfReadParams, deps: PdfReadDeps): Prom
 // already deleted by pi's argument layer (normalizeOptionalNulls, verified
 // against the pinned runtime), but null-ish STRINGS pass schema validation for
 // string-typed fields and used to fail the default PDF read on first call
-// (review c-82). These exact tokens mean "absent" — anything else (e.g.
+// (review c-82). These exact tokens mean "absent" - anything else (e.g.
 // "null-2", "0", "abc") is still validated and rejected on its merits.
 const NULLISH_TOKENS = new Set(["null", "undefined"]);
 
@@ -776,8 +776,8 @@ export function normalizeOptionalFields(params: PdfReadParams): PdfReadParams {
 /**
  * Parameter and output schemas, parameterized on a typebox-like Type so the
  * shapes stay testable in bare node. The outputSchema union must keep the
- * native read variants — text is a string and a delegated image read returns
- * the native {type:"image",data,mimeType,note} shape — plus the PDF pages
+ * native read variants - text is a string and a delegated image read returns
+ * the native {type:"image",data,mimeType,note} shape - plus the PDF pages
  * shape for image mode.
  */
 export function readToolSchemas(Type: any): { parameters: any; outputSchema: any } {
@@ -793,7 +793,7 @@ export function readToolSchemas(Type: any): { parameters: any; outputSchema: any
 			pages: Type.Optional(
 				Type.String({
 					description:
-						'Only for PDFs: physical pages to read, 1-indexed: "3", "2-5", "1,4-6". Omit for all pages (text) or up to the 8-image bound (image). Never send null — omit instead.',
+						'Only for PDFs: physical pages to read, 1-indexed: "3", "2-5", "1,4-6". Omit for all pages (text) or up to the 8-image bound (image). Never send null - omit instead.',
 				}),
 			),
 			mode: Type.Optional(
@@ -837,8 +837,8 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 			"Read the contents of a file. Supports text files and images (jpg, png, gif, webp, bmp). Images are sent as attachments. " +
 			"For text files, output is truncated to 2000 lines or 50KB (whichever is hit first). Use offset/limit for large files. " +
 			"When you need the full file, continue with offset until complete. " +
-			'Local PDFs (files beginning with %PDF-) are read the same way: mode:"text" (default) extracts the text layer — ' +
-			"pages are labeled by physical PDF page number, which is never a printed page label — and mode:\"image\" renders " +
+			'Local PDFs (files beginning with %PDF-) are read the same way: mode:"text" (default) extracts the text layer - ' +
+			"pages are labeled by physical PDF page number, which is never a printed page label - and mode:\"image\" renders " +
 			"full-page PNGs (max 8 per read). Optional pages selects physical pages, e.g. \"3\" or \"2-5,7\".",
 		promptSnippet: "Read file contents (including local PDFs)",
 		promptGuidelines: ["Use read to examine files instead of cat or sed."],
@@ -866,7 +866,7 @@ function makeRenderers(TextCtor: any): Record<string, unknown> {
 			text += theme.fg("warning", `:${start}${end ? `-${end}` : ""}`);
 		}
 		const extras: string[] = [];
-		// null-filled optionals mean "not supplied" — never displayed as if meaningful
+		// null-filled optionals mean "not supplied" - never displayed as if meaningful
 		const meaningful = (v: any) =>
 			v !== undefined && v !== null && !(typeof v === "string" && ["", "null", "undefined"].includes(v.trim().toLowerCase()));
 		if (meaningful(args?.pages)) extras.push(`pages ${args.pages}`);

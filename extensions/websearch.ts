@@ -9,7 +9,7 @@ const MAX_FETCH_CHARS = 200_000;
 const PROVIDER_TIMEOUT_MS = 30_000;
 const RAW_TEXT_CAP = 20_000;
 // Public bounded-tool contract at this pin (extensions.md): DEFAULT_MAX_BYTES
-// 50KB, DEFAULT_MAX_LINES 2000, whichever hit first — honored via pi's own
+// 50KB, DEFAULT_MAX_LINES 2000, whichever hit first - honored via pi's own
 // truncateHead when running inside pi; the local fallback exists only for
 // bare-node test runs.
 const OUTPUT_BYTE_CAP = 50 * 1024;
@@ -247,7 +247,7 @@ function normalizeExaSearch(result: Record<string, any>): ExaOutcome {
 
 async function exaSearch(params: SearchParams, deps: WebSearchDeps): Promise<ExaOutcome> {
 	const numResults = clampInt(params.numResults, 1, MAX_NUM_RESULTS, DEFAULT_NUM_RESULTS);
-	// The Exa schema requires `objective`; the supplied query is the deterministic adaptation — no second model authors it.
+	// The Exa schema requires `objective`; the supplied query is the deterministic adaptation - no second model authors it.
 	const result = await exaMcpCall("web_search_exa", { query: params.query, objective: params.query, numResults }, deps);
 	return normalizeExaSearch(result);
 }
@@ -370,7 +370,7 @@ async function zaiSearch(
 	key: string,
 	deps: WebSearchDeps,
 ): Promise<ExaOutcome> {
-	// One composed signal spans the whole attempt — per-call timeouts would multiply the promised budget.
+	// One composed signal spans the whole attempt - per-call timeouts would multiply the promised budget.
 	const attemptSignal = boundedSignal(deps.signal, deps.timeoutMs ?? PROVIDER_TIMEOUT_MS);
 	const sessionId = await zaiSession(ZAI_SEARCH_URL, key, deps, attemptSignal);
 	// The verified schema shape is primary; only positively identified argument-shape failure advances.
@@ -442,7 +442,7 @@ function unwrapZaiReaderPayload(text: string): string {
 			return value.content;
 		}
 	} catch {
-		// not JSON — return as-is
+		// not JSON - return as-is
 	}
 	return text;
 }
@@ -468,16 +468,16 @@ async function runWithFallback(
 	}
 	const key = env.ZAI_API_KEY;
 	if (!key) {
-		throw new Error(`${toolName} failed — ${attempts.join("; ")}; zai: unavailable (ZAI_API_KEY not set)`);
+		throw new Error(`${toolName} failed - ${attempts.join("; ")}; zai: unavailable (ZAI_API_KEY not set)`);
 	}
 	try {
 		return await runZai();
 	} catch (err) {
-		// Cancellation arriving during fallback is not a provider failure — it must surface as cancellation, never trigger the next provider.
+		// Cancellation arriving during fallback is not a provider failure - it must surface as cancellation, never trigger the next provider.
 		throwIfAborted(deps.signal);
 		attempts.push(`zai: ${sanitizeDetail(err instanceof Error ? err.message : String(err), secrets)}`);
 	}
-	throw new Error(`${toolName} failed — ${attempts.join("; ")}`);
+	throw new Error(`${toolName} failed - ${attempts.join("; ")}`);
 }
 
 export async function runWebSearch(params: SearchParams, deps: WebSearchDeps = {}): Promise<ToolOutcome> {
@@ -507,7 +507,7 @@ function formatSearchOutcome(provider: string, outcome: ExaOutcome, numResults: 
 			lines.push(`    ${r.url}`);
 			if (r.excerpt) {
 				const excerpt = truncate(r.excerpt.replace(/\s+/g, " ").trim(), EXCERPT_CHARS);
-				lines.push(`    ${excerpt.text}${excerpt.truncated ? "…" : ""}`);
+				lines.push(`    ${excerpt.text}${excerpt.truncated ? "..." : ""}`);
 			}
 			lines.push("");
 		});
@@ -519,7 +519,7 @@ function formatSearchOutcome(provider: string, outcome: ExaOutcome, numResults: 
 	const capped = truncate(outcome.rawText!, RAW_TEXT_CAP);
 	return {
 		text:
-			`results via ${provider} (raw provider content; source structure not confidently parseable — URLs appear inline)\n\n` +
+			`results via ${provider} (raw provider content; source structure not confidently parseable - URLs appear inline)\n\n` +
 			capped.text +
 			(capped.truncated ? `\n\n[truncated at ${RAW_TEXT_CAP} characters]` : ""),
 		details: { provider, kind: "raw" },
@@ -560,7 +560,7 @@ async function formatFetchOutcome(
 	if (!capped.truncated) {
 		return { text: header + content, details: { provider, url, chars: content.length } };
 	}
-	// Content at MAX_FETCH_CHARS may be provider-truncated — never claim it is the complete page.
+	// Content at MAX_FETCH_CHARS may be provider-truncated - never claim it is the complete page.
 	const extractionCapped = content.length >= MAX_FETCH_CHARS;
 	const path = await persistOutputFile(url, content, deps);
 	return {
@@ -627,7 +627,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 			`Excerpts are capped at ${EXCERPT_CHARS} characters; pass recency/site operators inside the query text itself ` +
 			`(forwarded verbatim, backend filtering not guaranteed). One bounded attempt per provider, ${PROVIDER_TIMEOUT_MS / 1000}s timeout each.`,
 		promptSnippet:
-			"Use for current web information; returns sourced titles/URLs/excerpts, not full pages — follow up with web_fetch on promising URLs.",
+			"Use for current web information; returns sourced titles/URLs/excerpts, not full pages - follow up with web_fetch on promising URLs.",
 		parameters: Type.Object({
 			query: Type.String({ description: "Search query; recency/site operators may be included verbatim." }),
 			numResults: Type.Optional(
@@ -658,7 +658,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 			`Providers: keyless Exa MCP first, ZAI reader fallback when ZAI_API_KEY is set. ` +
 			`maxChars: inline character bound (default ${DEFAULT_FETCH_CHARS}, max ${MAX_FETCH_CHARS}); larger content is ` +
 			`written to a temporary file whose path is returned for ordinary reads. Extraction is capped at ${MAX_FETCH_CHARS} characters. ` +
-			`JavaScript-heavy pages may fail — the error says which provider and why.`,
+			`JavaScript-heavy pages may fail - the error says which provider and why.`,
 		promptSnippet:
 			"Use to read a specific page found via web_search; oversized content lands in a temp file you can read with offset/limit.",
 		parameters: Type.Object({

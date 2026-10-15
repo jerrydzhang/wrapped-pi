@@ -57,7 +57,7 @@ test("exa text sections parse into titled, dated, excerpted sources with exact U
 	assert.match(out.text, /^2 results via exa-mcp/);
 	assert.match(out.text, /\[1\] Saccade Tracker \(2026-01-05\)/);
 	assert.match(out.text, /    https:\/\/example\.com\/saccade\n/);
-	assert.match(out.text, /…$/m);
+	assert.match(out.text, /\.\.\.$/m);
 	assert.match(out.text, /\[2\] Event Sourcing Notes/);
 	assert.match(out.text, /    https:\/\/example\.org\/events/);
 	assert.equal(out.details.provider, "exa-mcp");
@@ -179,7 +179,7 @@ test("exa failure with no zai key reports the exa cause and the unavailable fall
 			{ query: "q" },
 			depsFrom(() => new Response("quota gone", { status: 429 })),
 		),
-		(err: Error) => /web_search failed — exa-mcp: HTTP 429.*zai: unavailable \(ZAI_API_KEY not set\)/.test(err.message),
+		(err: Error) => /web_search failed - exa-mcp: HTTP 429.*zai: unavailable \(ZAI_API_KEY not set\)/.test(err.message),
 	);
 });
 
@@ -200,7 +200,7 @@ test("total failure names every provider attempt with sanitized causes", async (
 			),
 		),
 		(err: Error) =>
-			/web_search failed — exa-mcp: HTTP 500: exa broke; zai: HTTP 502: zai broke/.test(err.message) &&
+			/web_search failed - exa-mcp: HTTP 500: exa broke; zai: HTTP 502: zai broke/.test(err.message) &&
 			!err.message.includes("test-key"),
 	);
 });
@@ -375,7 +375,7 @@ test("a second fetch of the same URL writes a new file and never rewrites the ea
 	}
 });
 
-test("a caller-legal maxChars cannot push multibyte output past the aggregate bound — it spills with a safe cut", async () => {
+test("a caller-legal maxChars cannot push multibyte output past the aggregate bound - it spills with a safe cut", async () => {
 	const dir = await mkdtemp(join(tmpdir(), "websearch-test-"));
 	try {
 		const out = await runWebFetch(

@@ -472,7 +472,7 @@ test("aborting bash_wait leaves the job running and its delivery intact", async 
 	await new Promise((r) => setTimeout(r, 150));
 	controller.abort();
 	const out = await waitP;
-	assert.match(out.content[0].text, /^Wait aborted — bg-1 still running, untouched\. Log: \S+$/);
+	assert.match(out.content[0].text, /^Wait aborted - bg-1 still running, untouched\. Log: \S+$/);
 	await waitFor(() => app.sent.length === 1);
 	assert.match(app.sent[0].message.content, /abort-survived/, "the aborted wait did not consume the completion");
 });
@@ -501,7 +501,7 @@ test("bash_wait on an already-delivered job returns a one-liner pointer", async 
 	await waitFor(() => app.sent.length === 1);
 	const out = await app.bashWait().execute("c2", { id: "bg-1" });
 	const text = out.content[0].text;
-	assert.match(text, /^bg-1 exited with code 0, ran [\d.]+s — result already delivered\. Log: \S+$/);
+	assert.match(text, /^bg-1 exited with code 0, ran [\d.]+s - result already delivered\. Log: \S+$/);
 	assert.doesNotMatch(text, /delivered-tail/, "no second copy of the tail");
 	assert.equal(app.sent.length, 1);
 });
@@ -525,7 +525,7 @@ test("bash_wait all mixes full texts for new results with pointers for delivered
 	const text = out.content[0].text;
 	assert.match(text, /bg-2\nBackground command bg-2 exited with code 0/);
 	assert.match(text, /mixed-slow/);
-	assert.match(text, /^bg-1 exited with code 0, ran [\d.]+s — result already delivered\. Log: \S+$/m);
+	assert.match(text, /^bg-1 exited with code 0, ran [\d.]+s - result already delivered\. Log: \S+$/m);
 	assert.doesNotMatch(text, /mixed-quick/, "a delivered job gets no second copy of the tail");
 	assert.equal(app.sent.length, 1, "bg-1 was delivered while the wait was pending; bg-2 was not");
 });
@@ -539,7 +539,7 @@ test("all-wait ended by abort recomputes undelivered jobs, never trusting the em
 	// Construct the sub-tick edge deterministically, registry-poking style: the
 	// job settles out-of-band and undelivered, and the wait ends by abort
 	// before any tick observes the settle. The abort leg carries an empty
-	// claim, which must not read as "nothing was undelivered" — the compose
+	// claim, which must not read as "nothing was undelivered" - the compose
 	// recomputes from state or the bug surfaces as a false no-pending return
 	// plus a follow-up duplicate later.
 	const job = jobs()[0];
