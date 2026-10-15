@@ -84,17 +84,24 @@ wrapped-pi executable without installing files into Pi's configuration.
 
 ## Subagent configuration
 
-Two environment variables, read by the extension at call time — the wrapper
-convention: nothing is installed into `~/.pi`, and normal Pi configuration
-(auth included) is inherited untouched by children.
+One user-authored file, plus the wrapper's internal launch plumbing. The
+wrapper convention holds: nothing is installed into or written under `~/.pi`,
+normal Pi configuration (auth included) is inherited untouched by children,
+and `wrapped-pi.json` is yours to author.
 
-- **`WRAPPED_PI_SUBAGENT_MODEL`** (required for `subagent`) — the child's
-  model, one user-configured pattern accepted by `pi --model` (for example
-  `anthropic/claude-haiku-*`). The caller does not choose a model per
-  invocation, and there is **no silent fallback to the session model**: with
-  the variable unset or blank the tool refuses and names it; with a pattern
-  that does not resolve, the child exits nonzero and the job reports the
-  failure with the child's diagnostics.
+- **`<agent-dir>/wrapped-pi.json`** (required for `subagent`) — the child's
+  model. The agent directory is resolved exactly as Pi resolves it
+  (`PI_CODING_AGENT_DIR` respected, default `~/.pi/agent`). One field:
+  `{"model": "provider/model-id"}` — any pattern `pi --model` accepts (for
+  example `anthropic/claude-haiku-*`); whitespace is trimmed and unknown keys
+  are tolerated. The file is read afresh at every launch, so edits apply to
+  the next subagent without restarting Pi. The caller does not choose a model
+  per invocation, and there is **no silent fallback to the session model**
+  and no precedence: with the file missing or unreadable, invalid JSON, or a
+  missing, non-string, or blank `model`, the tool refuses and names the file
+  and the cause. A pattern that does not resolve makes the child exit
+  nonzero; the job reports the failure with the child's diagnostics. A
+  settings command is future work — today the file is the whole interface.
 - **`WRAPPED_PI_EXTENSIONS`** (exported by the wrapper) — the same
   store-pinned extension list the wrapper passes as `-e`, newline-separated,
   so children load the bundled set including consumer `extraExtensions`.
@@ -136,8 +143,8 @@ environment and configuration.
 
 Run `nix run .` to launch wrapped-pi with this extension. It preserves normal
 Pi configuration and extension discovery; no global installation is needed.
-Set `WRAPPED_PI_SUBAGENT_MODEL` in the environment where you launch it to
-enable `subagent`.
+Create `<agent-dir>/wrapped-pi.json` (see [Subagent configuration](#subagent-configuration))
+to enable `subagent`.
 
 For source development, load `extensions/bash-background.ts` directly with
 plain Pi: `pi -e /path/to/this/repo/extensions/bash-background.ts`.

@@ -1,12 +1,13 @@
 import { spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { accessSync, closeSync, fstatSync, openSync, readSync } from "node:fs";
+import { accessSync, closeSync, fstatSync, openSync, readFileSync, readSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Type } from "typebox";
 import { Box, Text } from "@earendil-works/pi-tui";
 import {
 	createBashToolDefinition,
+	getAgentDir,
 	getShellConfig,
 	type ExtensionAPI,
 	type ExtensionContext,
@@ -53,11 +54,12 @@ const SA_WRAPPER = [
 	`printf "\\n${MARKER}:%s:%s\\n" "$nonce" "$code" >>"$out"`,
 ].join("\n");
 
-// User configuration for subagents, read from the environment (the wrapper
-// convention - nothing is installed into ~/.pi). The model pattern is
-// anything pi --model accepts; there is never a fallback to the session
-// model.
-const MODEL_ENV = "WRAPPED_PI_SUBAGENT_MODEL";
+// User configuration for subagents: one user-authored JSON file in Pi's agent
+// directory (PI_CODING_AGENT_DIR respected, default ~/.pi/agent), read afresh
+// at every launch - the wrapper convention: nothing is installed into or
+// written under ~/.pi. The model pattern is anything pi --model accepts;
+// there is never a fallback to the session model.
+const CONFIG_FILE = "wrapped-pi.json";
 // Set in every subagent child: the extension registers no subagent tool
 // there. Ordinary recursion prevention, not a security boundary - the child
 // can still launch pi through bash.
@@ -261,9 +263,57 @@ function childExtensions(): string[] {
 		.filter((line) => line.length > 0);
 }
 
-function configuredModel(): string | undefined {
-	const raw = process.env[MODEL_ENV]?.trim();
-	return raw ? raw : undefined;
+function configPath(): string {
+	return join(getAgentDir(), CONFIG_FILE);
+}
+
+// Reads the user's wrapped-pi.json afresh on every call (no caching - edits
+// apply to the next launch without restarting Pi) and refuses loudly on any
+// problem: every message names the file and an actionable cause. There is no
+// fallback and no precedence: a missing or invalid file is an error, never a
+// silent default.
+function configuredModel(): string {
+	const path = configPath();
+	let raw: string;
+	try {
+		raw = readFileSync(path, "utf8");
+	} catch (error) {
+		const code = (error as NodeJS.ErrnoException).code;
+		if (code === "ENOENT") {
+			throw new Error(
+				`No subagent model configured. Create ${path} containing {"model": "provider/model-id"} - the model is any pattern pi --model accepts. There is no fallback to the session model.`,
+			);
+		}
+		throw new Error(
+			`Cannot read the subagent configuration ${path} (${code}). Make the file readable, then launch the subagent again.`,
+		);
+	}
+	let parsed: unknown;
+	try {
+		parsed = JSON.parse(raw);
+	} catch (error) {
+		throw new Error(
+			`Cannot parse the subagent configuration ${path}: not valid JSON (${(error as Error).message}). Fix the file, then launch the subagent again.`,
+		);
+	}
+	if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+		throw new Error(
+			`Invalid subagent configuration in ${path}: expected a JSON object like {"model": "provider/model-id"}.`,
+		);
+	}
+	const model = (parsed as { model?: unknown }).model;
+	if (typeof model !== "string") {
+		throw new Error(
+			`Invalid subagent configuration in ${path}: "model" must be a non-empty string like "provider/model-id" (missing or not a string).`,
+		);
+	}
+	const trimmed = model.trim();
+	if (trimmed === "") {
+		throw new Error(
+			`Invalid subagent configuration in ${path}: "model" must be a non-empty string like "provider/model-id" (it is blank).`,
+		);
+	}
+	return trimmed;
 }
 
 async function spawnSubagent(task: string, model: string, ctx: ExtensionContext | undefined): Promise<BgJob> {
@@ -1114,11 +1164,6 @@ export default function (handle: ExtensionAPI) {
 					throw new Error("Give the subagent a task: a non-empty description of the work.");
 				}
 				const model = configuredModel();
-				if (model === undefined) {
-						throw new Error(
-							`No subagent model configured. Set ${MODEL_ENV} to a model pattern (anything pi --model accepts) in the environment Pi runs in - there is no fallback to the session model.`,
-						);
-					}
 				// The call's abort signal is deliberately unused: it aborts the tool
 				// call, and a subagent must outlive the call that started it.
 				const job = await spawnSubagent(task, model, ctx);

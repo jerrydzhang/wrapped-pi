@@ -19,10 +19,13 @@ sources in the executable's runtime closure. The wrapper installs nothing into
 preferences, and sessions. Normal user/project extension discovery remains
 active, subject to Pi's usual project trust rules.
 
-To use the bundled `subagent` tool, set `WRAPPED_PI_SUBAGENT_MODEL` to a model
-pattern (anything `pi --model` accepts) in the environment where you launch
-the wrapper; without it the tool refuses rather than silently falling back to
-the session model. The wrapper exports `WRAPPED_PI_EXTENSIONS` (its pinned
+To use the bundled `subagent` tool, create `<agent-dir>/wrapped-pi.json` —
+Pi's agent directory (`PI_CODING_AGENT_DIR` respected, default `~/.pi/agent`)
+— containing `{"model": "provider/model-id"}`, any pattern `pi --model`
+accepts. The file is user-authored and read afresh at every launch, so edits
+apply without restarting Pi; with the file missing or invalid the tool
+refuses rather than silently falling back to the session model. The wrapper
+exports `WRAPPED_PI_EXTENSIONS` (its pinned
 `-e` list) so subagent children load the bundled set, `extraExtensions`
 included. See [the extension's documentation](extensions/bash-background.md)
 for the full contract.

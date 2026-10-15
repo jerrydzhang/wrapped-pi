@@ -2,6 +2,9 @@
 // built-in bash records what the extension forwards to it, so delegation is
 // pinned without reimplementing pi.
 
+import { homedir } from "node:os";
+import { join } from "node:path";
+
 const state = {
 	builtinExecute: async () => ({ content: [{ type: "text", text: "builtin ok" }], details: undefined }),
 	calls: [],
@@ -47,4 +50,15 @@ export function createBashToolDefinition(cwd) {
 
 export function getShellConfig() {
 	return { shell: "/bin/sh", args: ["-c"] };
+}
+
+// Mirrors pi 1.2.0's getAgentDir faithfully (verified against the pinned
+// runtime's dist/config.js): PI_CODING_AGENT_DIR with a leading tilde
+// expanded, else ~/.pi/agent.
+export function getAgentDir() {
+	const envDir = process.env.PI_CODING_AGENT_DIR;
+	if (envDir) {
+		return envDir.startsWith("~") ? join(homedir(), envDir.slice(1)) : envDir;
+	}
+	return join(homedir(), ".pi", "agent");
 }

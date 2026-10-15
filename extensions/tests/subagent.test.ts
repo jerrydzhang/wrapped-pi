@@ -4,9 +4,9 @@
 // --model ... -e ... -- task, stdout = final response only, stderr =
 // diagnostics, graceful SIGTERM with detached-descendant cleanup), so the job
 // machinery is exercised against real processes end to end.
-import { test } from "node:test";
+import { test, after } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import bashBackground from "../bash-background.ts";
@@ -14,6 +14,17 @@ import { fakePi, testCtx, resetRegistry, jobs, groupAlive, waitFor } from "./fak
 
 const FAKE_CLI = new URL("./fake-pi-cli.mjs", import.meta.url).pathname;
 const MODEL = "test/mini";
+
+// Every test's configuration lives in a disposable agent directory pointed at
+// by PI_CODING_AGENT_DIR - exactly how the extension resolves the agent dir -
+// so the suite never touches the real ~/.pi/agent or its auth.
+const agentDirs = [];
+
+after(() => {
+	delete process.env.PI_CODING_AGENT_DIR;
+	delete process.env.WRAPPED_PI_SUBAGENT_MODEL;
+	for (const dir of agentDirs) rmSync(dir, { recursive: true, force: true });
+});
 
 // Points spawnSubagent's relaunch at the fake CLI: production resolves the
 // child from process.execPath + process.argv[1], tests substitute argv[1].
@@ -29,12 +40,26 @@ function withFakeCli(fn) {
 	};
 }
 
+function escapeRegExp(text) {
+	return text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function configFile() {
+	return join(process.env.PI_CODING_AGENT_DIR, "wrapped-pi.json");
+}
+
+function writeConfig(body) {
+	writeFileSync(configFile(), body);
+}
+
 function fresh(options = {}) {
 	resetRegistry();
 	delete process.env.WRAPPED_PI_CHILD;
-	if (options.model === undefined) process.env.WRAPPED_PI_SUBAGENT_MODEL = MODEL;
-	else if (options.model !== null) process.env.WRAPPED_PI_SUBAGENT_MODEL = options.model;
-	else delete process.env.WRAPPED_PI_SUBAGENT_MODEL;
+	const dir = options.agentDir ?? mkdtempSync(join(tmpdir(), "sa-agent-"));
+	agentDirs.push(dir);
+	process.env.PI_CODING_AGENT_DIR = dir;
+	if (options.config !== undefined) writeConfig(options.config);
+	else if (options.model !== null) writeConfig(JSON.stringify({ model: options.model ?? MODEL }));
 	if (options.extensionsEnv !== null) process.env.WRAPPED_PI_EXTENSIONS = options.extensionsEnv;
 	else delete process.env.WRAPPED_PI_EXTENSIONS;
 	const app = fakePi();
@@ -101,15 +126,65 @@ test("without a configured model the tool refuses before spawning", async () => 
 	const app = fresh({ model: null });
 	await assert.rejects(
 		app.subagent().execute("c1", { task: "SAY:x" }, undefined, undefined, testCtx("/tmp")),
-		/No subagent model configured. Set WRAPPED_PI_SUBAGENT_MODEL/,
+		new RegExp(`No subagent model configured\\. Create ${escapeRegExp(configFile())} containing \\{"model": "provider/model-id"\\}`),
 	);
-	process.env.WRAPPED_PI_SUBAGENT_MODEL = "   ";
+	// The removed environment variable neither configures nor overrides: with
+	// it set, a missing file is still a missing file.
+	process.env.WRAPPED_PI_SUBAGENT_MODEL = "legacy/env-model";
 	await assert.rejects(
 		app.subagent().execute("c2", { task: "SAY:x" }, undefined, undefined, testCtx("/tmp")),
-		/No subagent model configured/,
+		/No subagent model configured\. Create .+wrapped-pi\.json/,
+	);
+	writeConfig('{"model":"   "}');
+	await assert.rejects(
+		app.subagent().execute("c3", { task: "SAY:x" }, undefined, undefined, testCtx("/tmp")),
+		(it) => {
+			assert.match(it.message, /"model" must be a non-empty string .*\(it is blank\)\./);
+			assert.match(it.message, new RegExp(escapeRegExp(configFile())));
+			return true;
+		},
 	);
 	assert.equal(jobs().length, 0, "nothing armed on refusal");
 	assert.equal(app.sent.length, 0);
+});
+
+test("a malformed configuration file refuses with the file and cause named", async () => {
+	const cases = [
+		['{"model":', /not valid JSON/],
+		['"just a string"', /expected a JSON object/],
+		['[{"model":"m"}]', /expected a JSON object/],
+		["{}", /"model" must be a non-empty string.*\(missing or not a string\)\./],
+		['{"model": 5}', /"model" must be a non-empty string.*\(missing or not a string\)\./],
+	];
+	for (const [i, [body, shape]] of cases.entries()) {
+		const app = fresh({ config: body });
+		await assert.rejects(
+			app.subagent().execute(`c${i}`, { task: "SAY:x" }, undefined, undefined, testCtx("/tmp")),
+			(it) => {
+				assert.match(it.message, shape);
+				assert.match(it.message, new RegExp(escapeRegExp(configFile())), "the error names the file");
+				return true;
+			},
+		);
+		assert.equal(jobs().length, 0, "nothing armed on refusal");
+	}
+});
+
+test("an unreadable configuration file refuses with the file named", { skip: process.getuid?.() === 0 && "running as root: permissions not enforceable" }, async () => {
+	const app = fresh();
+	chmodSync(configFile(), 0o000);
+	try {
+		await assert.rejects(
+			app.subagent().execute("c1", { task: "SAY:x" }, undefined, undefined, testCtx("/tmp")),
+			(it) => {
+				assert.match(it.message, /Cannot read the subagent configuration .+wrapped-pi\.json \(EACCES\)\./);
+				return true;
+			},
+		);
+		assert.equal(jobs().length, 0);
+	} finally {
+		chmodSync(configFile(), 0o600);
+	}
 });
 
 test("an empty task is refused", async () => {
@@ -147,6 +222,88 @@ test(
 			assert.equal(start.childMarker, "1", "recursion marker set");
 			assert.deepEqual(start.staleSessionEnv, [], "no parent PI_* session state leaks");
 			assert.equal(start.extensionsEnv, "/store/first.ts\n\n/store/second.ts\n", "wrapper list inherited untouched");
+		} finally {
+			delete process.env.FAKE_PI_FACTS;
+			rmSync(facts.dir, { recursive: true, force: true });
+		}
+	}),
+);
+
+test(
+	"the configuration is read afresh on every launch - edits apply without restarting Pi",
+	withFakeCli(async () => {
+		const facts = factsFile();
+		try {
+			process.env.FAKE_PI_FACTS = facts.path;
+			const app = fresh();
+			await app.subagent().execute("c1", { task: "SAY:first" }, undefined, undefined, testCtx("/tmp"));
+			await waitFor(() => jobs()[0].state === "exited");
+			// Rewrite the file between launches: unknown keys tolerated, whitespace
+			// trimmed - the next launch reads the new value, no restart involved.
+			writeConfig('{"model":"  test/other  ","future":true}\n');
+			await app.subagent().execute("c2", { task: "SAY:second" }, undefined, undefined, testCtx("/tmp"));
+			await waitFor(() => jobs().length === 2 && jobs()[1].state === "exited");
+			const starts = readFacts(facts.path).filter((record) => record.kind === "start");
+			assert.equal(starts.length, 2);
+			assert.equal(starts[0].model, MODEL, "first launch used the file as written");
+			assert.equal(starts[1].model, "test/other", "second launch read the rewritten file");
+			assert.equal(jobs()[1].model, "test/other", "the job record carries the re-read model");
+		} finally {
+			delete process.env.FAKE_PI_FACTS;
+			rmSync(facts.dir, { recursive: true, force: true });
+		}
+	}),
+);
+
+test(
+	"the configuration location follows PI_CODING_AGENT_DIR",
+	withFakeCli(async () => {
+		const facts = factsFile();
+		const dirs = ["a", "b", "c"].map((tag) => mkdtempSync(join(tmpdir(), `sa-agent-${tag}-`)));
+		dirs.forEach((dir) => agentDirs.push(dir));
+		try {
+			process.env.FAKE_PI_FACTS = facts.path;
+			writeFileSync(join(dirs[0], "wrapped-pi.json"), JSON.stringify({ model: "a/first" }));
+			writeFileSync(join(dirs[1], "wrapped-pi.json"), JSON.stringify({ model: "b/second" }));
+			const app = fresh({ agentDir: dirs[0], model: null });
+			await app.subagent().execute("c1", { task: "SAY:one" }, undefined, undefined, testCtx("/tmp"));
+			await waitFor(() => jobs()[0].state === "exited");
+			// Same session, different agent directory: the next launch resolves
+			// through the variable, never a cached or default location.
+			process.env.PI_CODING_AGENT_DIR = dirs[1];
+			await app.subagent().execute("c2", { task: "SAY:two" }, undefined, undefined, testCtx("/tmp"));
+			await waitFor(() => jobs()[1].state === "exited");
+			// An empty agent directory refuses even though dirA still holds a file.
+			process.env.PI_CODING_AGENT_DIR = dirs[2];
+			await assert.rejects(
+				app.subagent().execute("c3", { task: "SAY:x" }, undefined, undefined, testCtx("/tmp")),
+				(it) => {
+					assert.match(it.message, new RegExp(escapeRegExp(join(dirs[2], "wrapped-pi.json"))));
+					return true;
+				},
+			);
+			const starts = readFacts(facts.path).filter((record) => record.kind === "start");
+			assert.deepEqual(starts.map((record) => record.model), ["a/first", "b/second"]);
+		} finally {
+			delete process.env.FAKE_PI_FACTS;
+			rmSync(facts.dir, { recursive: true, force: true });
+		}
+	}),
+);
+
+test(
+	"the removed environment variable has no precedence - the file is the only source",
+	withFakeCli(async () => {
+		const facts = factsFile();
+		try {
+			process.env.FAKE_PI_FACTS = facts.path;
+			process.env.WRAPPED_PI_SUBAGENT_MODEL = "legacy/env-model";
+			const app = fresh({ model: "file/model" });
+			await app.subagent().execute("c1", { task: "SAY:hi" }, undefined, undefined, testCtx("/tmp"));
+			await waitFor(() => jobs()[0].state === "exited");
+			const start = readFacts(facts.path).find((record) => record.kind === "start");
+			assert.equal(start.model, "file/model", "the file wins; the legacy variable is dead");
+			assert.equal(jobs()[0].model, "file/model");
 		} finally {
 			delete process.env.FAKE_PI_FACTS;
 			rmSync(facts.dir, { recursive: true, force: true });
