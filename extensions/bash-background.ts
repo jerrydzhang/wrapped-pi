@@ -17,34 +17,70 @@ const POLL_MS = 500;
 const STOP_GRACE_MS = 2000;
 const STOP_POLL_STEP_MS = 100;
 const AFTER_KILL_MS = 1000;
+// A subagent's SIGTERM shutdown is not instant: the child's print mode runs
+// its extension shutdown - which escalates against the child's own detached
+// jobs through the same TERM-then-KILL ladder (grace + kill windows) - before
+// it exits. The parent must outwait that whole cleanup, or its SIGKILL lands
+// mid-cleanup and orphans whatever detached group the child is still
+// escalating against (reproduced live: parent KILL at 2s, child escalation
+// pending at ~2.4s). Bounded extra patience, not a supervisor.
+const SA_STOP_GRACE_MS = STOP_GRACE_MS + AFTER_KILL_MS + 2000;
 const TAIL_BYTES = 4096;
 const TAIL_LINES = 20;
+// A subagent's result is a final assistant response, not command output: it
+// gets its own byte budget with no line cap, so a useful long answer survives
+// while context stays bounded. The full result stays on disk either way.
+const RESULT_TAIL_BYTES = 65536;
 const MAX_TIMEOUT_MS = 2_147_483_647;
 const SESSION_ENV_KEYS = ["PI_SESSION_ID", "PI_SESSION_FILE", "PI_PROVIDER", "PI_MODEL", "PI_REASONING_LEVEL"] as const;
-
-// The wrapper appends a nonce-tagged exit line: a reloaded instance holds no
-// ChildProcess, it recovers the exit code from the log.
+// Shared by both job kinds: the wrapper shell around a job's process appends
+// the nonce-tagged exit line, so a reloaded instance (which holds no
+// ChildProcess) recovers the exit code - and for subagents the result text -
+// from the file.
 const WRAPPER = [
 	"cmd=$1; nonce=$2; shift 2",
 	'"$@" "$cmd"; code=$?',
 	`printf "\\n${MARKER}:%s:%s\\n" "$nonce" "$code"`,
 ].join("\n");
 
+// The subagent child: the same Pi the session runs in, relaunched headless
+// (print mode writes only the final assistant response to stdout). stdout is
+// captured to the result file, stderr to the diagnostics file, and the exit
+// marker lands in the result file - reload takeover reads all three back.
+const SA_WRAPPER = [
+	"out=$1; err=$2; nonce=$3; shift 3",
+	'"$@" >"$out" 2>"$err"; code=$?',
+	`printf "\\n${MARKER}:%s:%s\\n" "$nonce" "$code" >>"$out"`,
+].join("\n");
+
+// User configuration for subagents, read from the environment (the wrapper
+// convention - nothing is installed into ~/.pi). The model pattern is
+// anything pi --model accepts; there is never a fallback to the session
+// model.
+const MODEL_ENV = "WRAPPED_PI_SUBAGENT_MODEL";
+// Set in every subagent child: the extension registers no subagent tool
+// there. Ordinary recursion prevention, not a security boundary - the child
+// can still launch pi through bash.
+const CHILD_ENV = "WRAPPED_PI_CHILD";
+// Exported by the wrapper with the same store-pinned extension paths it
+// passes as -e, so the bundled set (extraExtensions included) reaches
+// children too. Absent (plain pi, dev tree) - children load ordinary
+// discovery only.
+const EXTENSIONS_ENV = "WRAPPED_PI_EXTENSIONS";
+
 type JobState = "running" | "stopping" | "exited" | "unknown" | "stopped";
 
-// Plain data only: a reloaded instance takes jobs over from marker reads, so
-// nothing process-bound or session-bound may live here.
-interface BgJob {
+type JobKind = "bash" | "subagent";
+
+interface JobCommon {
 	id: string;
-	command: string;
-	logPath: string;
+	kind: JobKind;
 	pid: number;
 	nonce: string;
 	startedAt: number;
-	deadlineAt?: number;
 	state: JobState;
 	stopReason?: "stopped" | "timeout";
-	/** Set when a stop escalation ended unresolved; the command may live on. */
+	/** Set when a stop escalation ended unresolved; the job may live on. */
 	stopFailed?: "survived" | "denied";
 	exitCode?: number;
 	endedAt?: number;
@@ -52,6 +88,28 @@ interface BgJob {
 	stopping: boolean;
 	groupGone: boolean;
 }
+
+// Plain data only: a reloaded instance takes jobs over from marker reads, so
+// nothing process-bound or session-bound may live here.
+interface BashJob extends JobCommon {
+	kind: "bash";
+	command: string;
+	/** Combined command output plus the exit marker. */
+	logPath: string;
+	deadlineAt?: number;
+}
+
+interface SubagentJob extends JobCommon {
+	kind: "subagent";
+	task: string;
+	model: string;
+	/** The result file: the child's stdout (its final response) plus the exit marker. */
+	logPath: string;
+	/** The child's stderr - diagnostics, surfaced on failure. */
+	errPath: string;
+}
+
+type BgJob = BashJob | SubagentJob;
 
 interface Registry {
 	jobs: Map<string, BgJob>;
@@ -160,6 +218,7 @@ async function spawnJob(command: string, timeout: number | undefined, ctx: Exten
 		child.unref();
 		const reg = registry();
 		const job: BgJob = {
+			kind: "bash",
 			id: `bg-${reg.nextId++}`,
 			command,
 			logPath,
@@ -180,10 +239,98 @@ async function spawnJob(command: string, timeout: number | undefined, ctx: Exten
 	}
 }
 
-// Bounded reads only: a log can grow without limit.
-function readTail(job: BgJob, bytes: number): { text: string; size: number } {
+// The child Pi must not see the parent session's PI_* state (pi's own
+// nested-pi hygiene - the child sets its own). The child marker disables the
+// subagent tool there: ordinary recursion prevention, nothing more.
+function childEnv(): NodeJS.ProcessEnv {
+	const env = { ...process.env };
+	for (const key of SESSION_ENV_KEYS) delete env[key];
+	env[CHILD_ENV] = "1";
+	return env;
+}
+
+// The wrapper exports the store-pinned -e list so the bundled set
+// (extraExtensions included) reaches children. Newline-separated; blank
+// lines are ignored.
+function childExtensions(): string[] {
+	const raw = process.env[EXTENSIONS_ENV];
+	if (!raw) return [];
+	return raw
+		.split("\n")
+		.map((line) => line.trim())
+		.filter((line) => line.length > 0);
+}
+
+function configuredModel(): string | undefined {
+	const raw = process.env[MODEL_ENV]?.trim();
+	return raw ? raw : undefined;
+}
+
+async function spawnSubagent(task: string, model: string, ctx: ExtensionContext | undefined): Promise<BgJob> {
+	// Relaunch the same Pi this session runs in: argv[1] is the CLI entry the
+	// host executed, execPath the interpreter running it.
+	const entry = process.argv[1];
+	if (typeof entry !== "string" || entry === "") {
+		throw new Error("Cannot locate the Pi CLI entry (process.argv[1] is empty); launching a subagent needs the running Pi command line.");
+	}
+	const cwd = ctx?.cwd ?? process.cwd();
 	try {
-		const fd = openSync(job.logPath, "r");
+		accessSync(cwd);
+	} catch {
+		throw new Error(`Working directory does not exist: ${cwd}\nCannot launch a subagent.`);
+	}
+	const stem = randomBytes(6).toString("hex");
+	const logPath = join(tmpdir(), `sa-${stem}.out`);
+	const errPath = join(tmpdir(), `sa-${stem}.err`);
+	const nonce = randomBytes(8).toString("hex");
+	const outFd = openSync(logPath, "wx", 0o600);
+	const errFd = openSync(errPath, "wx", 0o600);
+	try {
+		const args = ["--print", "--no-session", "--model", model];
+		for (const extension of childExtensions()) args.push("-e", extension);
+		args.push("--", task);
+		const child = spawn("sh", ["-c", SA_WRAPPER, "sa", logPath, errPath, nonce, process.execPath, entry, ...args], {
+			cwd,
+			env: childEnv(),
+			detached: true,
+			stdio: "ignore",
+		});
+		// The armed reply must not lie: spawn failures surface here as errors.
+		await new Promise<void>((resolve, reject) => {
+			child.once("spawn", resolve);
+			child.once("error", reject);
+		});
+		child.on("error", () => {});
+		child.unref();
+		const reg = registry();
+		const job: BgJob = {
+			kind: "subagent",
+			id: `sa-${reg.nextId++}`,
+			task,
+			model,
+			logPath,
+			errPath,
+			pid: child.pid!,
+			nonce,
+			startedAt: Date.now(),
+			state: "running",
+			notified: false,
+			stopping: false,
+			groupGone: false,
+		};
+		reg.jobs.set(job.id, job);
+		ensurePoller();
+		return job;
+	} finally {
+		closeSync(outFd);
+		closeSync(errFd);
+	}
+}
+
+// Bounded reads only: a log can grow without limit.
+function readPathTail(path: string, bytes: number): { text: string; size: number } {
+	try {
+		const fd = openSync(path, "r");
 		try {
 			const size = fstatSync(fd).size;
 			const start = Math.max(0, size - bytes);
@@ -196,6 +343,10 @@ function readTail(job: BgJob, bytes: number): { text: string; size: number } {
 	} catch {
 		return { text: "", size: 0 };
 	}
+}
+
+function readTail(job: BgJob, bytes: number): { text: string; size: number } {
+	return readPathTail(job.logPath, bytes);
 }
 
 // Only a completed, nonce-tagged marker line counts; anything else a command
@@ -240,15 +391,60 @@ function outputTail(job: BgJob): { text: string; cut: "none" | "lines" | "bytes"
 	};
 }
 
+// The subagent result: the child's stdout is its final assistant response,
+// so this is NOT command-output tail semantics - the byte budget is its own
+// (RESULT_TAIL_BYTES), there is no line cap, and the only thing stripped is
+// the control marker. A cut result still points at the full text on disk.
+function resultTail(job: SubagentJob): { text: string; cut: boolean } {
+	const { text: raw, size } = readPathTail(job.logPath, RESULT_TAIL_BYTES);
+	const bytesCut = size > RESULT_TAIL_BYTES;
+	let start = 0;
+	while (start < Math.min(3, raw.length) && (raw.charCodeAt(start) & 0xc0) === 0x80) start++;
+	const text = raw
+		.slice(start)
+		.replace(new RegExp(`\\n?${MARKER}:${job.nonce}(:\\d+)?(\\n|$)`), "")
+		.replace(/\n+$/, "");
+	if (bytesCut) {
+		// The window opens mid-line; drop that partial line - the cut notice
+		// covers it.
+		const newline = text.indexOf("\n");
+		if (newline !== -1) return { text: text.slice(newline + 1), cut: true };
+	}
+	return { text, cut: bytesCut };
+}
+
+// Diagnostics are failure detail: the command-output caps fit and keep the
+// completion from flooding context.
+function errTail(job: SubagentJob): { text: string; cut: "none" | "lines" | "bytes" } {
+	const { text: raw, size } = readPathTail(job.errPath, TAIL_BYTES);
+	const bytesCut = size > TAIL_BYTES;
+	let start = 0;
+	while (start < Math.min(3, raw.length) && (raw.charCodeAt(start) & 0xc0) === 0x80) start++;
+	let text = raw.slice(start);
+	if (bytesCut) {
+		const newline = text.indexOf("\n");
+		if (newline !== -1) text = text.slice(newline + 1);
+	}
+	const lines = text.split("\n");
+	const joined = lines.join("\n").replace(/\n+$/, "");
+	if (joined === "") return { text: "", cut: bytesCut ? "bytes" : "none" };
+	if (bytesCut) return { text: joined, cut: "bytes" };
+	const cut = lines.length > TAIL_LINES || Buffer.byteLength(joined) > TAIL_BYTES;
+	return {
+		text: cut ? lines.slice(-TAIL_LINES).join("\n") : joined,
+		cut: cut ? "lines" : "none",
+	};
+}
+
 function oneLine(command: string): string {
 	const line = command.replace(/\s*\n\s*/g, " ");
 	return line.length > 120 ? `${line.slice(0, 117)}...` : line;
 }
 
 // The card caps tighter than oneLine: a snapshot row stays one line on any
-// reasonable pane instead of wrapping.
-function cardCommand(command: string): string {
-	const line = oneLine(command);
+// reasonable pane instead of wrapping. The job's own text - command or task.
+function cardText(job: BgJob): string {
+	const line = oneLine(job.kind === "subagent" ? job.task : job.command);
 	return line.length > 80 ? `${line.slice(0, 77)}...` : line;
 }
 
@@ -270,7 +466,7 @@ function timerField(elapsedMs: number, totalMs: number | undefined): string {
 }
 
 function jobTotalMs(job: BgJob): number | undefined {
-	return job.deadlineAt !== undefined ? job.deadlineAt - job.startedAt : undefined;
+	return job.kind === "bash" && job.deadlineAt !== undefined ? job.deadlineAt - job.startedAt : undefined;
 }
 
 // Live is the wait-relevant sense: a job the session can still see settle.
@@ -302,7 +498,14 @@ function timeoutSeconds(job: BgJob): number {
 
 function outcome(job: BgJob): string {
 	if (job.state === "exited") {
-		const base = job.exitCode === 0 ? "exited with code 0" : `failed: exited with code ${job.exitCode}`;
+		const base =
+			job.kind === "subagent"
+				? job.exitCode === 0
+					? "finished"
+					: `failed: its Pi process exited with code ${job.exitCode}`
+				: job.exitCode === 0
+					? "exited with code 0"
+					: `failed: exited with code ${job.exitCode}`;
 		if (job.stopFailed === "denied" || job.stopFailed === "survived") {
 			return job.stopReason === "timeout"
 				? `${base} after its timeout of ${timeoutSeconds(job)}s elapsed (stop could not be completed)`
@@ -318,6 +521,7 @@ function outcome(job: BgJob): string {
 }
 
 function completionText(job: BgJob): string {
+	if (job.kind === "subagent") return subagentCompletionText(job);
 	const seconds = Math.round(((job.endedAt ?? Date.now()) - job.startedAt) / 100) / 10;
 	const { text, cut } = outputTail(job);
 	const lines = [
@@ -328,6 +532,28 @@ function completionText(job: BgJob): string {
 	else if (cut === "bytes") lines.push(`Output (tail; earlier output cut) - full output: ${job.logPath}`, text);
 	else if (cut === "lines") lines.push(`Output, last ${TAIL_LINES} lines - full output: ${job.logPath}`, text);
 	else lines.push("Output:", text, `Full output: ${job.logPath}`);
+	return lines.join("\n");
+}
+
+function subagentCompletionText(job: SubagentJob): string {
+	const seconds = Math.round(((job.endedAt ?? Date.now()) - job.startedAt) / 100) / 10;
+	const lines = [
+		`Subagent ${job.id} ${outcome(job)}, ran ${seconds}s.`,
+		`Task: ${oneLine(job.task)}`,
+	];
+	if (job.state === "exited" && job.exitCode === 0) {
+		const { text, cut } = resultTail(job);
+		if (text === "") lines.push(cut ? `Earlier response was cut - full result: ${job.logPath}` : "(no response text)");
+		else if (cut) lines.push(`Result (tail; earlier response cut) - full result: ${job.logPath}`, text);
+		else lines.push("Result:", text);
+		return lines.join("\n");
+	}
+	const { text, cut } = errTail(job);
+	if (text === "") lines.push(cut === "bytes" ? `Earlier diagnostics were cut - full diagnostics: ${job.errPath}` : "(no diagnostics)");
+	else if (cut === "bytes") lines.push(`Diagnostics (tail; earlier output cut) - full diagnostics: ${job.errPath}`, text);
+	else if (cut === "lines") lines.push(`Diagnostics, last ${TAIL_LINES} lines - full diagnostics: ${job.errPath}`, text);
+	else lines.push("Diagnostics:", text);
+	lines.push(`Any partial response: ${job.logPath}`);
 	return lines.join("\n");
 }
 
@@ -346,6 +572,7 @@ function deliver(job: BgJob): void {
 					exitCode: job.exitCode ?? null,
 					durationMs: (job.endedAt ?? Date.now()) - job.startedAt,
 					logPath: job.logPath,
+					...(job.kind === "subagent" ? { errPath: job.errPath } : {}),
 				},
 			},
 			// followUp never interrupts a running turn; triggerTurn wakes an idle
@@ -361,7 +588,7 @@ function deliver(job: BgJob): void {
 
 const killsInFlight = new Map<string, Promise<string>>();
 
-// ---- bash_wait ----
+// ---- wait ----
 //
 // Waiters live in module scope, never in the registry: a reload kills the
 // module copy and its pending tool calls together, and a fresh instance must
@@ -386,7 +613,7 @@ const allWaiters = new Set<AllWaiter>();
 // Called from pollTick only, between the settle loop and the deliver pass:
 // a wait that can be satisfied claims its completion here (notified set), so
 // deliver() skips it in the same tick - wait wins, the follow-up never
-// duplicates what bash_wait returns.
+// duplicates what the wait returns.
 function resolveWaiters(): void {
 	for (const waiter of jobWaiters) {
 		if (isLive(waiter.job)) continue;
@@ -411,11 +638,19 @@ function deliveredOneLiner(job: BgJob): string {
 }
 
 // The still-running line: synchronization status only, never an output tail
-// - progress inspection stays a deliberate log read.
+// - progress inspection stays a deliberate log read. For a subagent the
+// useful pointer is the diagnostics file: the result file stays empty until
+// the child's final response lands.
 function stillRunningLine(job: BgJob): string {
 	const elapsed = fmtElapsedMs(Date.now() - job.startedAt);
 	const total = jobTotalMs(job);
-	return `${job.id} still running, ${total !== undefined ? `${elapsed} / ${fmtTotalMs(total)}` : elapsed}. Log: ${job.logPath}`;
+	return `${job.id} still running, ${total !== undefined ? `${elapsed} / ${fmtTotalMs(total)}` : elapsed}. Log: ${logPointer(job)}`;
+}
+
+// Where a "still running" pointer should lead: the bash log, a subagent's
+// diagnostics (its result file is empty until completion).
+function logPointer(job: BgJob): string {
+	return job.kind === "subagent" ? job.errPath : job.logPath;
 }
 
 // The all-wait return: every job this session started, headed per job - the
@@ -430,7 +665,7 @@ function composeAllWait(claimed: BgJob[] | undefined): string {
 		.sort((a, b) => a.startedAt - b.startedAt);
 	const full = claimed ?? settled.filter((job) => !job.notified);
 	for (const job of full) job.notified = true;
-	if (full.length === 0) return "No background commands pending.";
+	if (full.length === 0) return "No background jobs pending.";
 	return settled.map((job) => (full.includes(job) ? `${job.id}\n${completionText(job)}` : deliveredOneLiner(job))).join("\n\n");
 }
 
@@ -480,7 +715,8 @@ async function stopJob(job: BgJob, reason: "stopped" | "timeout"): Promise<strin
 			if (how === "denied") denied = true;
 		};
 		attempt("SIGTERM");
-		for (let waited = 0; !stopped && !denied && waited < STOP_GRACE_MS; waited += STOP_POLL_STEP_MS) {
+		const grace = job.kind === "subagent" ? SA_STOP_GRACE_MS : STOP_GRACE_MS;
+		for (let waited = 0; !stopped && !denied && waited < grace; waited += STOP_POLL_STEP_MS) {
 			await sleep(STOP_POLL_STEP_MS);
 			stopped = !probeAlive(job.pid, true);
 		}
@@ -540,7 +776,7 @@ function pollTick(): void {
 	const reg = registry();
 	for (const job of reg.jobs.values()) {
 		if (job.state !== "running" || job.stopping) continue;
-		if (job.deadlineAt !== undefined && !job.stopFailed && Date.now() >= job.deadlineAt) {
+		if (job.kind === "bash" && job.deadlineAt !== undefined && !job.stopFailed && Date.now() >= job.deadlineAt) {
 			void stopJob(job, "timeout");
 			continue;
 		}
@@ -577,7 +813,10 @@ function attach(handle: ExtensionAPI): void {
 }
 
 const BACKGROUND_CONTRACT =
-	"Set background:true to run a command detached and continue other work: the call returns at once with a job id and a log path, and the result is delivered to you automatically as a follow-up message when the command finishes - do not poll or sleep-wait. bash_wait returns a background command's result in this turn and no follow-up fires for a job it returns; the log is for progress while the job runs. timeout, if set, limits total runtime including time in the background. Stop a running background command with bash_stop.";
+	"Set background:true to run a command detached and continue other work: the call returns at once with a job id and a log path, and the result is delivered to you automatically as a follow-up message when the command finishes - do not poll or sleep-wait. wait returns a background job's result in this turn and no follow-up fires for a job it returns; the log is for progress while the job runs. timeout, if set, limits total runtime including time in the background. Stop a running background job with stop.";
+
+const SUBAGENT_CONTRACT =
+	"Launch a subagent: a fresh Pi session in this working directory that carries out a task independently. The child starts from the task and ordinary project instructions - never this conversation - with ordinary tools but no subagent tool of its own (no recursive agents). Start is asynchronous: the call returns at once with a job id (sa-N). Its final response is delivered here automatically when it finishes, or returned in-turn by wait; stop terminates a running child. The child model is user-configured, not chosen per call.";
 
 export default function (handle: ExtensionAPI) {
 	// Bound at factory time, not only at session_start: a completion may land
@@ -611,7 +850,7 @@ export default function (handle: ExtensionAPI) {
 							`Command: ${oneLine(input.command)}`,
 							`Output streams to ${job.logPath} - read it anytime for progress while the job runs.`,
 							job.deadlineAt !== undefined ? `Deadline: ${input.timeout}s total runtime.` : "No deadline.",
-							"The result will be delivered here automatically when it finishes, or returned in-turn by bash_wait - continue other work instead of polling.",
+							"The result will be delivered here automatically when it finishes, or returned in-turn by wait - continue other work instead of polling.",
 						].join("\n"),
 					},
 				],
@@ -620,28 +859,29 @@ export default function (handle: ExtensionAPI) {
 		},
 	});
 	handle.registerTool({
-		name: "bash_stop",
-		label: "Stop background command",
+		name: "stop",
+		label: "Stop background job",
 		description:
-			"Stop a background command (bash with background:true) that this session started, by its job id (bg-N). Terminates the command's whole process group and reports the observed outcome; the stop result is the outcome - no completion message follows for a command you stopped.",
+			"Stop a background job (a bash command started with background:true, or a subagent) that this session started, by its job id (bg-N or sa-N). Terminates the job's whole process group and reports the observed outcome; the stop result is the outcome - no completion message follows for a job you stopped.",
 		parameters: Type.Object({
-			id: Type.String({ description: "Job id returned by a background bash call, e.g. bg-1" }),
+			id: Type.String({ description: "Job id returned by a background bash call (bg-N) or a subagent call (sa-N)" }),
 		}),
 		async execute(_toolCallId, params) {
 			const job = registry().jobs.get(params.id);
 			if (!job) {
 				return {
-					content: [{ type: "text", text: `No background command ${params.id} in this session. Only commands started here can be stopped.` }],
+					content: [{ type: "text", text: `No background job ${params.id} in this session. Only jobs started here can be stopped.` }],
 					details: { id: params.id, found: false },
 				};
 			}
 			if (job.state !== "running" && job.state !== "stopping") {
 				const seconds = Math.round(((job.endedAt ?? Date.now()) - job.startedAt) / 100) / 10;
+				const where = job.kind === "subagent" ? `Result: ${job.logPath}` : `Output: ${job.logPath}`;
 				return {
 					content: [
 						{
 							type: "text",
-							text: `${job.id} already finished: ${outcome(job)}, ran ${seconds}s. Output: ${job.logPath}`,
+							text: `${job.id} already finished: ${outcome(job)}, ran ${seconds}s. ${where}`,
 						},
 					],
 					details: { id: job.id, state: job.state },
@@ -655,13 +895,13 @@ export default function (handle: ExtensionAPI) {
 		},
 	});
 	handle.registerTool({
-		name: "bash_wait",
-		label: "Wait for background command",
+		name: "wait",
+		label: "Wait for background job",
 		description:
-			"Wait for a background command (bash with background:true) this session started and get its result in this turn: the completion that would have arrived as a follow-up message is returned by this call instead - no follow-up fires for a job bash_wait returns. Give id (bg-N) to wait for one job, or all: true to wait until no background command is still running; jobs whose results were already delivered get a one-line pointer. timeout (seconds) bounds the wait; on expiry each still-running job gets one line with its log path, never an output tail. Aborting the call ends the wait only - the job keeps running.",
+			"Wait for a background job (a bash command started with background:true, or a subagent) that this session started and get its result in this turn: the completion that would have arrived as a follow-up message is returned by this call instead - no follow-up fires for a job wait returns. Give id (bg-N or sa-N) to wait for one job, or all: true to wait until no background job is still running; jobs whose results were already delivered get a one-line pointer. timeout (seconds) bounds the wait; on expiry each still-running job gets one line with its log path, never an output tail. Aborting the call ends the wait only - the job keeps running.",
 		parameters: Type.Object({
-			id: Type.Optional(Type.String({ description: "Job id returned by a background bash call, e.g. bg-1" })),
-			all: Type.Optional(Type.Boolean({ description: "Wait until no background command from this session is still running" })),
+			id: Type.Optional(Type.String({ description: "Job id returned by a background bash call (bg-N) or a subagent call (sa-N)" })),
+			all: Type.Optional(Type.Boolean({ description: "Wait until no background job from this session is still running" })),
 			timeout: Type.Optional(Type.Number({ description: "Maximum seconds to wait; omitted means no deadline" })),
 		}),
 		async execute(_toolCallId, params, signal) {
@@ -670,7 +910,7 @@ export default function (handle: ExtensionAPI) {
 				throw new Error("Give either id or all, not both.");
 			}
 			if (input.id === undefined && input.all !== true) {
-				throw new Error("Give id (a bg-N job id) or all: true.");
+				throw new Error("Give id (a bg-N or sa-N job id) or all: true.");
 			}
 			validateTimeout(input.timeout);
 			const deadline = input.timeout !== undefined ? Date.now() + input.timeout * 1000 : undefined;
@@ -680,7 +920,7 @@ export default function (handle: ExtensionAPI) {
 				if (!job) {
 					return {
 						content: [
-							{ type: "text", text: `No background command ${input.id} in this session. Only commands started here can be waited on.` },
+							{ type: "text", text: `No background job ${input.id} in this session. Only jobs started here can be waited on.` },
 						],
 					details: { id: input.id, found: false },
 					};
@@ -703,7 +943,7 @@ export default function (handle: ExtensionAPI) {
 				}
 				if (signal?.aborted) {
 					return {
-						content: [{ type: "text", text: `Wait aborted - ${job.id} still running, untouched. Log: ${job.logPath}` }],
+						content: [{ type: "text", text: `Wait aborted - ${job.id} still running, untouched. Log: ${logPointer(job)}` }],
 						details: { id: job.id, aborted: true },
 					};
 				}
@@ -766,7 +1006,7 @@ export default function (handle: ExtensionAPI) {
 						};
 					}
 					return {
-						content: [{ type: "text", text: `Wait aborted - ${job.id} still running, untouched. Log: ${job.logPath}` }],
+						content: [{ type: "text", text: `Wait aborted - ${job.id} still running, untouched. Log: ${logPointer(job)}` }],
 						details: { id: job.id, aborted: true },
 					};
 				} finally {
@@ -854,8 +1094,54 @@ export default function (handle: ExtensionAPI) {
 			}
 		},
 	});
+	// Registered only outside subagent children: the child marker set by
+	// spawnSubagent removes the tool there, which is ordinary recursion
+	// prevention - not a security boundary (a child can still launch pi through
+	// bash).
+	if (process.env[CHILD_ENV] !== "1") {
+		handle.registerTool({
+			name: "subagent",
+			label: "Launch a subagent",
+			description: SUBAGENT_CONTRACT,
+			parameters: Type.Object({
+				task: Type.String({
+					description: "The task for the child to carry out; it sees project instructions and ordinary tools, never this conversation",
+				}),
+			}),
+			async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+				const task = (params as { task: string }).task;
+				if (task.trim() === "") {
+					throw new Error("Give the subagent a task: a non-empty description of the work.");
+				}
+				const model = configuredModel();
+				if (model === undefined) {
+						throw new Error(
+							`No subagent model configured. Set ${MODEL_ENV} to a model pattern (anything pi --model accepts) in the environment Pi runs in - there is no fallback to the session model.`,
+						);
+					}
+				// The call's abort signal is deliberately unused: it aborts the tool
+				// call, and a subagent must outlive the call that started it.
+				const job = await spawnSubagent(task, model, ctx);
+				return {
+					content: [
+						{
+							type: "text",
+							text: [
+								`Subagent ${job.id} started (pid ${job.pid}).`,
+								`Task: ${oneLine(task)}`,
+								`Model: ${model}`,
+								`The final response will be delivered here automatically when it finishes, or returned in-turn by wait - continue other work instead of polling.`,
+								`No intermediate progress: ${job.errPath} collects diagnostics if it fails; the result lands in ${job.logPath} at completion.`,
+							].join("\n"),
+						},
+					],
+					details: undefined,
+				};
+			},
+		});
+	}
 	handle.registerCommand("bg", {
-		description: "List background commands this session started, with live timers (snapshot card in the transcript; no model context)",
+		description: "List background jobs this session started (commands and subagents), with live timers (snapshot card in the transcript; no model context)",
 		handler: async () => {
 			// The card is a record of the check: custom entries never enter LLM
 			// context, and the snapshot stays honest in scrollback and on disk.
@@ -865,7 +1151,7 @@ export default function (handle: ExtensionAPI) {
 					id: j.id,
 					elapsedMs: Date.now() - j.startedAt,
 					timeoutMs: jobTotalMs(j),
-					command: cardCommand(j.command),
+					command: cardText(j),
 					logPath: j.logPath,
 				})),
 			});

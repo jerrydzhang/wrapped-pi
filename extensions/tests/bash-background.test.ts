@@ -32,7 +32,7 @@ async function withKeepalive(promise) {
 	}
 }
 
-test("registers bash with background plus bash_stop, keeping the builtin shape", () => {
+test("registers bash with background plus stop and wait, keeping the builtin shape", () => {
 	const app = fresh();
 	bashBackground(app.handle);
 	const bash = app.bash();
@@ -43,7 +43,7 @@ test("registers bash with background plus bash_stop, keeping the builtin shape",
 	assert.ok(bash.description.includes("builtin ok") === false);
 	assert.ok(bash.promptSnippet === "Execute bash commands (ls, grep, find, etc)");
 	assert.deepEqual(bash.promptGuidelines, ["builtin guideline kept by the spread"]);
-	assert.equal(app.bashStop().name, "bash_stop");
+	assert.equal(app.stop().name, "stop");
 });
 
 test("ordinary calls delegate to the builtin with only command and timeout", async () => {
@@ -143,12 +143,12 @@ test("a positive timeout stops the group and reports the deadline outcome", asyn
 	await waitFor(() => !groupAlive(pid));
 });
 
-test("bash_stop terminates the group and no completion follows", async () => {
+test("stop terminates the group and no completion follows", async () => {
 	const app = fresh();
 	bashBackground(app.handle);
 	const out = await app.bash().execute("c1", { command: "sleep 30", background: true }, undefined, undefined, testCtx("/tmp"));
 	const pid = pidFrom(out.content[0].text);
-	const stopped = await app.bashStop().execute("c2", { id: "bg-1" });
+	const stopped = await app.stop().execute("c2", { id: "bg-1" });
 	assert.match(stopped.content[0].text, /bg-1 stopped \(command group gone\)/);
 	await waitFor(() => !groupAlive(pid));
 	await new Promise((r) => setTimeout(r, 700));
@@ -158,11 +158,11 @@ test("bash_stop terminates the group and no completion follows", async () => {
 test("stopping an unknown or finished id is honest", async () => {
 	const app = fresh();
 	bashBackground(app.handle);
-	const unknown = await app.bashStop().execute("c1", { id: "bg-9" });
-	assert.match(unknown.content[0].text, /No background command bg-9/);
+	const unknown = await app.stop().execute("c1", { id: "bg-9" });
+	assert.match(unknown.content[0].text, /No background job bg-9/);
 	const armed = await app.bash().execute("c2", { command: "echo quick", background: true }, undefined, undefined, testCtx("/tmp"));
 	await waitFor(() => app.sent.length === 1);
-	const late = await app.bashStop().execute("c3", { id: "bg-1" });
+	const late = await app.stop().execute("c3", { id: "bg-1" });
 	assert.match(late.content[0].text, /already finished/);
 	assert.equal(app.sent.length, 1, "no second report after completion");
 	assert.match(armed.content[0].text, /bg-1/);
@@ -253,8 +253,8 @@ test("a replaced session never adopts or delivers old jobs", async () => {
 	bashBackground(second.handle);
 	await second.emit("session_start", { reason: "resume" });
 	assert.equal(second.sent.length, 0);
-	const orphan = await second.bashStop().execute("c1", { id: "bg-1" });
-	assert.match(orphan.content[0].text, /No background command bg-1/);
+	const orphan = await second.stop().execute("c1", { id: "bg-1" });
+	assert.match(orphan.content[0].text, /No background job bg-1/);
 });
 
 test("shutdown awaits escalation for TERM-ignoring commands before returning", async () => {
@@ -303,8 +303,8 @@ test("concurrent stops join one escalation and report one outcome", async () => 
 	bashBackground(app.handle);
 	await app.bash().execute("c1", { command: "sleep 30", background: true }, undefined, undefined, testCtx("/tmp"));
 	const [first, second] = await Promise.all([
-		app.bashStop().execute("c2", { id: "bg-1" }),
-		app.bashStop().execute("c3", { id: "bg-1" }),
+		app.stop().execute("c2", { id: "bg-1" }),
+		app.stop().execute("c3", { id: "bg-1" }),
 	]);
 	assert.equal(first.content[0].text, second.content[0].text);
 	assert.match(first.content[0].text, /stopped \(command group gone\)/);
@@ -373,8 +373,8 @@ test("/bg appends a snapshot card without model context, then an empty card", as
 		],
 	);
 	assert.ok(card.data.jobs.every((j) => j.elapsedMs >= 0));
-	await app.bashStop().execute("c3", { id: "bg-1" });
-	await app.bashStop().execute("c4", { id: "bg-2" });
+	await app.stop().execute("c3", { id: "bg-1" });
+	await app.stop().execute("c4", { id: "bg-2" });
 	await app.bgCommand().handler("", { ui: app.ui() });
 	assert.equal(app.entries.length, 2);
 	assert.deepEqual(app.entries[1].data.jobs, [], "empty check records no jobs");
@@ -404,45 +404,45 @@ test("card commands are capped to a single 80-char line", async () => {
 	assert.equal(command.length, 80, "77 chars plus the ellipsis");
 	assert.match(command, /^sleep 30; echo a+\.+$/, "capped with an ellipsis");
 	assert.ok(!command.includes("\n"), "newlines collapsed");
-	await app.bashStop().execute("c2", { id: "bg-1" });
+	await app.stop().execute("c2", { id: "bg-1" });
 });
 
-// ---- bash_wait ----
+// ---- wait ----
 
-test("registers bash_wait with the ratified interface", () => {
+test("registers wait with the shared-job interface", () => {
 	const app = fresh();
 	bashBackground(app.handle);
-	const wait = app.bashWait();
-	assert.equal(wait.name, "bash_wait");
-	assert.equal(wait.label, "Wait for background command");
+	const wait = app.wait();
+	assert.equal(wait.name, "wait");
+	assert.equal(wait.label, "Wait for background job");
 	assert.ok(wait.parameters.properties.id, "optional id param");
 	assert.ok(wait.parameters.properties.all, "optional all param");
 	assert.ok(wait.parameters.properties.timeout, "optional timeout param");
-	assert.match(wait.description, /no follow-up fires for a job bash_wait returns/);
+	assert.match(wait.description, /no follow-up fires for a job wait returns/);
 	assert.match(wait.description, /never an output tail/);
 });
 
-test("bash_wait validation refuses id+all, neither, and bad timeouts", async () => {
+test("wait validation refuses id+all, neither, and bad timeouts", async () => {
 	const app = fresh();
 	bashBackground(app.handle);
-	await assert.rejects(app.bashWait().execute("c1", { id: "bg-1", all: true }), /not both/);
-	await assert.rejects(app.bashWait().execute("c2", {}), /Give id \(a bg-N job id\) or all: true\./);
+	await assert.rejects(app.wait().execute("c1", { id: "bg-1", all: true }), /not both/);
+	await assert.rejects(app.wait().execute("c2", {}), /Give id \(a bg-N or sa-N job id\) or all: true\./);
 	await assert.rejects(
-		app.bashWait().execute("c3", { id: "bg-1", timeout: 0 }),
+		app.wait().execute("c3", { id: "bg-1", timeout: 0 }),
 		/Invalid timeout: must be a finite number of seconds/,
 	);
 	await assert.rejects(
-		app.bashWait().execute("c4", { all: true, timeout: Number.NaN }),
+		app.wait().execute("c4", { all: true, timeout: Number.NaN }),
 		/Invalid timeout: must be a finite number of seconds/,
 	);
 	assert.equal(app.sent.length, 0);
 });
 
-test("bash_wait settles with the completion text inline and suppresses the follow-up", async () => {
+test("wait settles with the completion text inline and suppresses the follow-up", async () => {
 	const app = fresh();
 	bashBackground(app.handle);
 	await app.bash().execute("c1", { command: "echo wait-settle-ok", background: true }, undefined, undefined, testCtx("/tmp"));
-	const out = await withKeepalive(app.bashWait().execute("c2", { id: "bg-1" }));
+	const out = await withKeepalive(app.wait().execute("c2", { id: "bg-1" }));
 	assert.match(out.content[0].text, /^Background command bg-1 exited with code 0, ran [\d.]+s\./);
 	assert.match(out.content[0].text, /wait-settle-ok/);
 	assert.match(out.content[0].text, /Full output: \S*bash-bg-[0-9a-f]+\.log/);
@@ -450,25 +450,25 @@ test("bash_wait settles with the completion text inline and suppresses the follo
 	assert.equal(app.sent.length, 0, "wait claimed the completion; no follow-up fires");
 });
 
-test("bash_wait timeout returns one still-running line per job, no tail", async () => {
+test("wait timeout returns one still-running line per job, no tail", async () => {
 	const app = fresh();
 	bashBackground(app.handle);
 	await app.bash().execute("c1", { command: "sleep 30", background: true, timeout: 60 }, undefined, undefined, testCtx("/tmp"));
-	const out = await app.bashWait().execute("c2", { id: "bg-1", timeout: 1 });
+	const out = await app.wait().execute("c2", { id: "bg-1", timeout: 1 });
 	const text = out.content[0].text;
 	assert.equal(text.split("\n").length, 1, "exactly one line");
 	assert.match(text, /^bg-1 still running, \d+s \/ 1m\. Log: \S+$/);
 	assert.ok(!text.includes("Output"), "no output tail");
-	const stopped = await app.bashStop().execute("c3", { id: "bg-1" });
+	const stopped = await app.stop().execute("c3", { id: "bg-1" });
 	assert.match(stopped.content[0].text, /stopped/);
 });
 
-test("aborting bash_wait leaves the job running and its delivery intact", async () => {
+test("aborting wait leaves the job running and its delivery intact", async () => {
 	const app = fresh();
 	bashBackground(app.handle);
 	await app.bash().execute("c1", { command: "sleep 1; echo abort-survived", background: true }, undefined, undefined, testCtx("/tmp"));
 	const controller = new AbortController();
-	const waitP = app.bashWait().execute("c2", { id: "bg-1" }, controller.signal);
+	const waitP = app.wait().execute("c2", { id: "bg-1" }, controller.signal);
 	await new Promise((r) => setTimeout(r, 150));
 	controller.abort();
 	const out = await waitP;
@@ -477,7 +477,7 @@ test("aborting bash_wait leaves the job running and its delivery intact", async 
 	assert.match(app.sent[0].message.content, /abort-survived/, "the aborted wait did not consume the completion");
 });
 
-test("bash_wait on an already-settled, never-delivered job replays the full text", async () => {
+test("wait on an already-settled, never-delivered job replays the full text", async () => {
 	const app = fresh();
 	bashBackground(app.handle);
 	await app.bash().execute("c1", { command: "echo settled-replay", background: true }, undefined, undefined, testCtx("/tmp"));
@@ -487,41 +487,41 @@ test("bash_wait on an already-settled, never-delivered job replays the full text
 	// job reset to undelivered, in the same macrotask as the wait call.
 	jobs()[0].notified = false;
 	app.sent.length = 0;
-	const out = await app.bashWait().execute("c2", { id: "bg-1" });
+	const out = await app.wait().execute("c2", { id: "bg-1" });
 	assert.match(out.content[0].text, /exited with code 0/);
 	assert.match(out.content[0].text, /settled-replay/);
 	await new Promise((r) => setTimeout(r, 800));
 	assert.equal(app.sent.length, 0, "the replay claimed the completion; no follow-up fires");
 });
 
-test("bash_wait on an already-delivered job returns a one-liner pointer", async () => {
+test("wait on an already-delivered job returns a one-liner pointer", async () => {
 	const app = fresh();
 	bashBackground(app.handle);
 	await app.bash().execute("c1", { command: "echo delivered-tail", background: true }, undefined, undefined, testCtx("/tmp"));
 	await waitFor(() => app.sent.length === 1);
-	const out = await app.bashWait().execute("c2", { id: "bg-1" });
+	const out = await app.wait().execute("c2", { id: "bg-1" });
 	const text = out.content[0].text;
 	assert.match(text, /^bg-1 exited with code 0, ran [\d.]+s - result already delivered\. Log: \S+$/);
 	assert.doesNotMatch(text, /delivered-tail/, "no second copy of the tail");
 	assert.equal(app.sent.length, 1);
 });
 
-test("bash_wait all settles a pending job with its headed full text", async () => {
+test("wait all settles a pending job with its headed full text", async () => {
 	const app = fresh();
 	bashBackground(app.handle);
 	await app.bash().execute("c1", { command: "sleep 0.8", background: true }, undefined, undefined, testCtx("/tmp"));
-	const out = await withKeepalive(app.bashWait().execute("c2", { all: true }));
+	const out = await withKeepalive(app.wait().execute("c2", { all: true }));
 	assert.match(out.content[0].text, /bg-1\nBackground command bg-1 exited with code 0, ran [\d.]+s\./);
 	await new Promise((r) => setTimeout(r, 800));
 	assert.equal(app.sent.length, 0, "the all-wait claimed the completion; no follow-up fires");
 });
 
-test("bash_wait all mixes full texts for new results with pointers for delivered ones", async () => {
+test("wait all mixes full texts for new results with pointers for delivered ones", async () => {
 	const app = fresh();
 	bashBackground(app.handle);
 	await app.bash().execute("c1", { command: "echo mixed-quick", background: true }, undefined, undefined, testCtx("/tmp"));
 	await app.bash().execute("c2", { command: "sleep 1.3; echo mixed-slow", background: true }, undefined, undefined, testCtx("/tmp"));
-	const out = await withKeepalive(app.bashWait().execute("c3", { all: true }));
+	const out = await withKeepalive(app.wait().execute("c3", { all: true }));
 	const text = out.content[0].text;
 	assert.match(text, /bg-2\nBackground command bg-2 exited with code 0/);
 	assert.match(text, /mixed-slow/);
@@ -535,7 +535,7 @@ test("all-wait ended by abort recomputes undelivered jobs, never trusting the em
 	bashBackground(app.handle);
 	await app.bash().execute("c1", { command: "sleep 30", background: true }, undefined, undefined, testCtx("/tmp"));
 	const controller = new AbortController();
-	const waitP = withKeepalive(app.bashWait().execute("c2", { all: true }, controller.signal));
+	const waitP = withKeepalive(app.wait().execute("c2", { all: true }, controller.signal));
 	// Construct the sub-tick edge deterministically, registry-poking style: the
 	// job settles out-of-band and undelivered, and the wait ends by abort
 	// before any tick observes the settle. The abort leg carries an empty
@@ -549,51 +549,51 @@ test("all-wait ended by abort recomputes undelivered jobs, never trusting the em
 	controller.abort();
 	const out = await waitP;
 	assert.match(out.content[0].text, /^bg-1\nBackground command bg-1 exited with code 0, ran [\d.]+s\./);
-	assert.doesNotMatch(out.content[0].text, /already delivered|No background commands pending/);
+	assert.doesNotMatch(out.content[0].text, /already delivered|No background jobs pending/);
 	assert.equal(job.notified, true, "the wait claimed the out-of-band settle");
 	await new Promise((r) => setTimeout(r, 700));
 	assert.equal(app.sent.length, 0, "no duplicate follow-up afterwards");
 });
 
-test("bash_wait all with nothing pending returns immediately", async () => {
+test("wait all with nothing pending returns immediately", async () => {
 	const app = fresh();
 	bashBackground(app.handle);
-	const empty = await app.bashWait().execute("c1", { all: true });
-	assert.equal(empty.content[0].text, "No background commands pending.");
+	const empty = await app.wait().execute("c1", { all: true });
+	assert.equal(empty.content[0].text, "No background jobs pending.");
 	await app.bash().execute("c2", { command: "echo quick-done", background: true }, undefined, undefined, testCtx("/tmp"));
 	await waitFor(() => app.sent.length === 1);
-	const delivered = await app.bashWait().execute("c3", { all: true });
-	assert.equal(delivered.content[0].text, "No background commands pending.");
+	const delivered = await app.wait().execute("c3", { all: true });
+	assert.equal(delivered.content[0].text, "No background jobs pending.");
 });
 
-test("bash_wait on a mid-stop job awaits the in-flight kill and returns its result", async () => {
+test("wait on a mid-stop job awaits the in-flight kill and returns its result", async () => {
 	const app = fresh();
 	bashBackground(app.handle);
 	await app.bash().execute("c1", { command: 'trap "" TERM; while :; do sleep 0.1; done', background: true, timeout: 1 }, undefined, undefined, testCtx("/tmp"));
 	// stopping flips the moment pollTick arms the deadline stop; the grace
 	// window is two seconds, so the wait starts while the kill is in flight.
 	await waitFor(() => jobs()[0].stopping === true, 5000);
-	const out = await app.bashWait().execute("c2", { id: "bg-1" });
+	const out = await app.wait().execute("c2", { id: "bg-1" });
 	assert.match(out.content[0].text, /^Background command bg-1 was stopped: its timeout of 1s elapsed, ran [\d.]+s\./);
 	await new Promise((r) => setTimeout(r, 800));
 	assert.equal(app.sent.length, 0, "the wait claimed the stopped job's result");
 });
 
-test("bash_wait on an unknown id matches the bash_stop refusal shape", async () => {
+test("wait on an unknown id matches the stop refusal shape", async () => {
 	const app = fresh();
 	bashBackground(app.handle);
-	const out = await app.bashWait().execute("c1", { id: "bg-9" });
-	assert.match(out.content[0].text, /No background command bg-9 in this session\./);
-	assert.match(out.content[0].text, /Only commands started here can be waited on\./);
+	const out = await app.wait().execute("c1", { id: "bg-9" });
+	assert.match(out.content[0].text, /No background job bg-9 in this session\./);
+	assert.match(out.content[0].text, /Only jobs started here can be waited on\./);
 });
 
-test("a pending bash_wait dies with its module copy on reload without claiming the completion", async () => {
+test("a pending wait dies with its module copy on reload without claiming the completion", async () => {
 	const first = fresh();
 	bashBackground(first.handle);
 	await first.emit("session_start", { reason: "startup" });
 	await first.bash().execute("c1", { command: "sleep 0.7; echo reload-wait-ok", background: true }, undefined, undefined, testCtx("/tmp"));
 	const controller = new AbortController();
-	const waitP = first.bashWait().execute("c2", { id: "bg-1" }, controller.signal);
+	const waitP = first.wait().execute("c2", { id: "bg-1" }, controller.signal);
 	await new Promise((r) => setTimeout(r, 150));
 	await first.emit("session_shutdown", { reason: "reload" });
 	// The reload drops the dying copy's waiters; its in-flight call ends as

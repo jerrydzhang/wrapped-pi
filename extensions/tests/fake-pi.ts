@@ -43,8 +43,9 @@ export function fakePi() {
 			for (const cb of handlers.get(event) ?? []) await cb(payload, ctx);
 		},
 		bash: () => tools.get("bash"),
-		bashStop: () => tools.get("bash_stop"),
-		bashWait: () => tools.get("bash_wait"),
+		stop: () => tools.get("stop"),
+		wait: () => tools.get("wait"),
+		subagent: () => tools.get("subagent"),
 		bgCommand: () => commands.get("bg"),
 	};
 }

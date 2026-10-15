@@ -42,6 +42,7 @@
         chmod -R u+w extensions
         node --test extensions/websearch.test.ts
         node --import ./extensions/tests/register.mjs --test extensions/tests/bash-background.test.ts
+        node --import ./extensions/tests/register.mjs --test extensions/tests/subagent.test.ts
         node --test extensions/tests/pdf-read.test.ts
         node --test extensions/tests/pdf-read.poppler.test.ts
         touch "$out"

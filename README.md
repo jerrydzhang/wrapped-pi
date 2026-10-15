@@ -1,7 +1,8 @@
 # wrapped-pi
 
 Pinned native Pi with bundled [web search](extensions/websearch.md),
-[background bash execution](extensions/bash-background.md), and
+[background jobs](extensions/bash-background.md) (detached commands and
+subagents with a shared wait/stop lifecycle), and
 [PDF-capable read](extensions/pdf-read.md) (Poppler from the package
 closure; non-PDF reads unchanged).
 
@@ -17,6 +18,14 @@ sources in the executable's runtime closure. The wrapper installs nothing into
 `~/.pi`; plain and wrapped Pi share the existing auth, model configuration,
 preferences, and sessions. Normal user/project extension discovery remains
 active, subject to Pi's usual project trust rules.
+
+To use the bundled `subagent` tool, set `WRAPPED_PI_SUBAGENT_MODEL` to a model
+pattern (anything `pi --model` accepts) in the environment where you launch
+the wrapper; without it the tool refuses rather than silently falling back to
+the session model. The wrapper exports `WRAPPED_PI_EXTENSIONS` (its pinned
+`-e` list) so subagent children load the bundled set, `extraExtensions`
+included. See [the extension's documentation](extensions/bash-background.md)
+for the full contract.
 
 If these extensions were previously installed globally, remove those managed
 copies explicitly before adopting the wrapper to avoid duplicate loading.
@@ -44,6 +53,7 @@ working-tree paths are a development-shell concern, not a release input.
 nix flake check
 node --test extensions/websearch.test.ts
 node --import ./extensions/tests/register.mjs --test extensions/tests/bash-background.test.ts
+node --import ./extensions/tests/register.mjs --test extensions/tests/subagent.test.ts
 node --test extensions/tests/pdf-read.test.ts
 node --test extensions/tests/pdf-read.poppler.test.ts   # real Poppler; skips without it
 ```
