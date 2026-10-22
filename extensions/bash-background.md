@@ -2,10 +2,11 @@
 
 A Pi extension that adds generic background jobs to a session: detached
 commands through the `bash` tool, and subagents that relaunch Pi itself on a
-task. Both kinds share one lifecycle - a background start returns at once, the
-result reaches the session either as an automatic follow-up message when the
-job finishes, or in-turn through `wait` when the model needs it before ending
-its turn.
+task. Both kinds share one lifecycle - a background start returns at once,
+and when the job finishes its completion is delivered to the session
+automatically: it enters between the model's tool calls while a run is
+active, or wakes an idle session. `wait` blocks until a job finishes and
+returns status only.
 
 Independently authored; no third-party extension code. Bundled by the
 wrapped-pi executable without installing files into Pi's configuration.
@@ -18,7 +19,8 @@ wrapped-pi executable without installing files into Pi's configuration.
 - A background call returns at once with a session-local job reference
   (`bg-N`), the pid, and a temporary output-log path. Reading that log (with
   the ordinary `read` tool) is for progress while a job runs; the completion
-  itself has named owners — the automatic follow-up, `wait`, or `stop`.
+  itself arrives as its own message — `wait` reports status, and `stop`'s
+  result is the outcome.
 - **`subagent { task }`** — launches one child Pi in the same working
   directory with fresh context: the task and ordinary project instructions
   (AGENTS.md and friends), never the parent conversation. The child gets the
@@ -29,7 +31,7 @@ wrapped-pi executable without installing files into Pi's configuration.
   sandboxing, or resumable conversations: one task, one final response.
 - The call returns at once with a job id (`sa-N`). The successful result is
   the child's **final assistant response** — not its tool transcript —
-  delivered automatically as a follow-up, or returned in-turn by `wait`. The
+  delivered automatically when the child finishes.
   result is capped at its own byte budget (64 KiB, no line cap; a command
   output's 20-line tail rules do not apply), with the full text kept at the
   result path. Failures report the exit code and a diagnostics tail (the
@@ -37,20 +39,27 @@ wrapped-pi executable without installing files into Pi's configuration.
   intermediate progress to read: print mode writes the final response only at
   the end.
 - **Automatic completion delivery** — a custom message (never user voice)
-  delivered with Pi's `followUp` carrier: it never interrupts a running turn,
-  and it wakes an idle session. Content names the job, the outcome, the
-  runtime, and a bounded tail with the full-output path.
-- **`wait {id}` / `{all: true, timeout?}`** — synchronization, not polling:
-  waits for background job(s) this session started (either kind) and returns
-  the result in this turn. The completion text the follow-up would have
-  carried comes back from the call instead — no follow-up fires for a job
-  `wait` returns. A job whose result was already delivered gets a one-line
-  pointer (outcome and log path), never a second copy of the tail. `all: true`
-  resolves when nothing is still running, headed per job — bash and subagent
-  jobs mix freely. `timeout` bounds the wait in seconds; on expiry each
-  still-running job reports one line with its elapsed time and log path, never
-  an output tail — progress inspection stays a deliberate log read. Aborting
-  the call ends the wait only; the job keeps running.
+  delivered with Pi's `steer` carrier: while a run is active it enters at the
+  next turn boundary — between the model's tool calls, before its next
+  request — and the agent loop cannot end a run with steered messages queued,
+  so a completion armed mid-run is always consumed inside that run, never a
+  trailing wake; an idle session is woken instead (triggerTurn). Content
+  names the job, the outcome, the runtime, a bounded tail, and —
+  unconditionally — the full-output path: the completion is the terminal
+  carrier of the log path, present on every branch.
+- **`wait {id}` / `{all: true, timeout?}`** — synchronization, not fetching:
+  blocks until background job(s) this session started (either kind) finish,
+  then returns status only — one line per job, never an output tail. The full
+  completion is delivered as its own message alongside the wait's result: the
+  call arms the delivery synchronously, so the completion is queued before
+  the wait's tool result reaches the model, and both are visible at its next
+  request. `all: true` resolves when nothing is still running — one status
+  line per settled job, bash and subagent jobs mixing freely. `timeout` bounds
+  the wait in seconds; on expiry each still-running job reports one status
+  line (elapsed, and total when the job carries a deadline). Aborting the
+  call ends the wait only; the job keeps running. Pointers ride boundaries —
+  the start message carries the standing log path, the completion carries it
+  terminally — and no pull (`wait` or `stop`) repeats them.
 - **`stop {id}`** — stops a background job this session started (either kind)
   by terminating its process group (SIGTERM, then SIGKILL), and reports the
   observed outcome honestly; it does not claim settlement that did not happen.

@@ -340,7 +340,7 @@ test(
 		assert.match(text, /Task: say hi and report/);
 		assert.match(text, /Model: test\/mini/);
 		assert.match(text, /delivered here automatically/);
-		assert.match(text, /in-turn by wait/);
+		assert.match(text, /returns status only/);
 		assert.equal(jobs().length, 1);
 		assert.equal(jobs()[0].kind, "subagent");
 		await app.stop().execute("c2", { id: "sa-1" });
@@ -355,11 +355,11 @@ test(
 		await waitFor(() => app.sent.length === 1);
 		const { message, options } = app.sent[0];
 		assert.equal(message.customType, "bash-background-result");
-		assert.deepEqual(options, { deliverAs: "followUp", triggerTurn: true });
+		assert.deepEqual(options, { deliverAs: "steer", triggerTurn: true });
 		assert.match(message.content, /^Subagent sa-1 finished, ran [\d.]+s\./);
 		assert.match(message.content, /Task: NOISY:the final answer\|stderr noise/);
-		assert.match(message.content, /Result:\nthe final answer\n?$/,
-		"the result section is exactly the child's stdout");
+		assert.match(message.content, /Result:\nthe final answer\nFull result: \S+$/,
+		"the result section is the child's stdout plus the unconditional full-result pointer");
 		assert.doesNotMatch(message.content, /Diagnostics:/, "diagnostics stay out of a successful result");
 		assert.doesNotMatch(message.content, /__BASH_BG_EXIT__/, "the exit marker never reaches the model");
 		assert.equal(message.details.exitCode, 0);
@@ -384,15 +384,17 @@ test(
 );
 
 test(
-	"wait returns the child's result in-turn and suppresses the follow-up",
+	"wait returns status only and arms the child's completion",
 	withFakeCli(async () => {
 		const app = fresh();
 		await app.subagent().execute("c1", { task: "SLOW-SAY:1:result-in-turn" }, undefined, undefined, testCtx("/tmp"));
 		const out = await withKeepalive(app.wait().execute("c2", { id: "sa-1" }));
-		assert.match(out.content[0].text, /^Subagent sa-1 finished, ran [\d.]+s\./);
-		assert.match(out.content[0].text, /Result:\nresult-in-turn/);
+		assert.equal(out.content[0].text, "sa-1 finished.");
+		await waitFor(() => app.sent.length === 1);
+		assert.match(app.sent[0].message.content, /result-in-turn/);
+		assert.deepEqual(app.sent[0].options, { deliverAs: "steer", triggerTurn: true });
 		await new Promise((r) => setTimeout(r, 800));
-		assert.equal(app.sent.length, 0, "the wait claimed the completion; no follow-up fires");
+		assert.equal(app.sent.length, 1, "exactly one completion");
 	}),
 );
 
@@ -404,7 +406,7 @@ test(
 		const out = await app.wait().execute("c2", { id: "sa-1", timeout: 1 });
 		const text = out.content[0].text;
 		assert.equal(text.split("\n").length, 1, "exactly one line");
-		assert.match(text, /^sa-1 still running, \d+s\. Log: \S+\.err$/);
+		assert.match(text, /^sa-1 still running, \d+s\.$/);
 		assert.ok(!text.includes("Result"), "no result tail");
 		const job = jobs()[0];
 		assert.equal(job.state, "running", "timeout leaves the child running");
@@ -423,7 +425,7 @@ test(
 		await new Promise((r) => setTimeout(r, 150));
 		controller.abort();
 		const out = await waitP;
-		assert.match(out.content[0].text, /^Wait aborted - sa-1 still running, untouched\. Log: \S+\.err$/);
+		assert.match(out.content[0].text, /^Wait aborted - sa-1 still running, untouched\.$/);
 		await waitFor(() => app.sent.length === 1);
 		assert.match(app.sent[0].message.content, /abort-delivered/, "the aborted wait did not consume the completion");
 	}),
@@ -552,19 +554,18 @@ test(
 );
 
 test(
-	"a mixed all-wait claims bash and subagent jobs together",
+	"a mixed all-wait reports both jobs and arms both completions",
 	withFakeCli(async () => {
 		const app = fresh();
 		await app.bash().execute("c1", { command: "sleep 1.4; echo mixed-bash-out", background: true }, undefined, undefined, testCtx("/tmp"));
 		await app.subagent().execute("c2", { task: "SLOW-SAY:1.2:mixed-child-result" }, undefined, undefined, testCtx("/tmp"));
 		const out = await withKeepalive(app.wait().execute("c3", { all: true }));
 		const text = out.content[0].text;
-		assert.match(text, /bg-1\nBackground command bg-1 exited with code 0, ran [\d.]+s\./);
-		assert.match(text, /mixed-bash-out/);
-		assert.match(text, /sa-2\nSubagent sa-2 finished, ran [\d.]+s\./);
-		assert.match(text, /mixed-child-result/);
-		await new Promise((r) => setTimeout(r, 800));
-		assert.equal(app.sent.length, 0, "the all-wait claimed both completions");
+		assert.match(text, /^bg-1 exited with code 0\.$/m);
+		assert.match(text, /^sa-2 finished\.$/m);
+		await waitFor(() => app.sent.length === 2);
+		assert.match(app.sent[0].message.content, /mixed-bash-out/);
+		assert.match(app.sent[1].message.content, /mixed-child-result/);
 	}),
 );
 

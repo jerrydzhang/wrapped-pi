@@ -578,7 +578,10 @@ function completionText(job: BgJob): string {
 		`Background command ${job.id} ${outcome(job)}, ran ${seconds}s.`,
 		`Command: ${oneLine(job.command)}`,
 	];
-	if (text === "") lines.push(cut === "bytes" ? `Earlier output was cut - full output: ${job.logPath}` : "(no output)");
+	// The durable pointer rides every branch: the completion is the terminal
+	// carrier of the log path, present even when there is no output to tail.
+	if (text === "" && cut === "bytes") lines.push(`No output in view; earlier output cut. Full output: ${job.logPath}`);
+	else if (text === "") lines.push("(no output)", `Full output: ${job.logPath}`);
 	else if (cut === "bytes") lines.push(`Output (tail; earlier output cut) - full output: ${job.logPath}`, text);
 	else if (cut === "lines") lines.push(`Output, last ${TAIL_LINES} lines - full output: ${job.logPath}`, text);
 	else lines.push("Output:", text, `Full output: ${job.logPath}`);
@@ -593,16 +596,19 @@ function subagentCompletionText(job: SubagentJob): string {
 	];
 	if (job.state === "exited" && job.exitCode === 0) {
 		const { text, cut } = resultTail(job);
-		if (text === "") lines.push(cut ? `Earlier response was cut - full result: ${job.logPath}` : "(no response text)");
+		// The durable pointer rides every branch, exactly as for a command.
+		if (text === "" && cut) lines.push(`No response in view; earlier response cut. Full result: ${job.logPath}`);
+		else if (text === "") lines.push("(no response text)", `Full result: ${job.logPath}`);
 		else if (cut) lines.push(`Result (tail; earlier response cut) - full result: ${job.logPath}`, text);
-		else lines.push("Result:", text);
+		else lines.push("Result:", text, `Full result: ${job.logPath}`);
 		return lines.join("\n");
 	}
 	const { text, cut } = errTail(job);
-	if (text === "") lines.push(cut === "bytes" ? `Earlier diagnostics were cut - full diagnostics: ${job.errPath}` : "(no diagnostics)");
+	if (text === "" && cut === "bytes") lines.push(`No diagnostics in view; earlier diagnostics cut. Full diagnostics: ${job.errPath}`);
+	else if (text === "") lines.push("(no diagnostics)", `Full diagnostics: ${job.errPath}`);
 	else if (cut === "bytes") lines.push(`Diagnostics (tail; earlier output cut) - full diagnostics: ${job.errPath}`, text);
 	else if (cut === "lines") lines.push(`Diagnostics, last ${TAIL_LINES} lines - full diagnostics: ${job.errPath}`, text);
-	else lines.push("Diagnostics:", text);
+	else lines.push("Diagnostics:", text, `Full diagnostics: ${job.errPath}`);
 	lines.push(`Any partial response: ${job.logPath}`);
 	return lines.join("\n");
 }
@@ -625,9 +631,13 @@ function deliver(job: BgJob): void {
 					...(job.kind === "subagent" ? { errPath: job.errPath } : {}),
 				},
 			},
-			// followUp never interrupts a running turn; triggerTurn wakes an idle
-			// session. This is the completion carrier, not a steer.
-			{ deliverAs: "followUp", triggerTurn: true },
+			// steer is the one completion carrier: mid-run the message enters at
+			// the next turn boundary - after the current tool calls, before the
+			// model's next request - and the agent loop cannot end a run while
+			// steering messages are queued, so a completion armed mid-run is
+			// always consumed inside that run, never a trailing wake.
+			// triggerTurn wakes an idle session with the same message.
+			{ deliverAs: "steer", triggerTurn: true },
 		);
 	} catch {
 		// A stale handle must not consume the result: the rebound instance
@@ -654,69 +664,55 @@ interface JobWaiter {
 }
 
 interface AllWaiter {
-	resolve: (end: WaitEnd, claimed: BgJob[]) => void;
+	resolve: (end: WaitEnd) => void;
 }
 
 const jobWaiters = new Set<JobWaiter>();
 const allWaiters = new Set<AllWaiter>();
 
 // Called from pollTick only, between the settle loop and the deliver pass:
-// a wait that can be satisfied claims its completion here (notified set), so
-// deliver() skips it in the same tick - wait wins, the follow-up never
-// duplicates what the wait returns.
+// pure resolution - a wait answers "done yet?" and carries no content, so it
+// claims nothing. The same tick's deliver pass arms the steer for every
+// freshly settled job; the wait's status line returns beside that message.
 function resolveWaiters(): void {
 	for (const waiter of jobWaiters) {
 		if (isLive(waiter.job)) continue;
 		jobWaiters.delete(waiter);
-		waiter.job.notified = true;
 		waiter.resolve("settled");
 	}
 	if (allWaiters.size === 0 || liveJobs().length > 0) return;
-	const claimed = [...registry().jobs.values()].filter((job) => !isLive(job) && !job.notified);
-	for (const job of claimed) job.notified = true;
 	for (const waiter of allWaiters) {
 		allWaiters.delete(waiter);
-		waiter.resolve("settled", claimed);
+		waiter.resolve("settled");
 	}
 }
 
-// A settled job whose result the model already has in context: outcome and
-// log path only - never a second copy of the tail.
-function deliveredOneLiner(job: BgJob): string {
-	const seconds = Math.round(((job.endedAt ?? Date.now()) - job.startedAt) / 100) / 10;
-	return `${job.id} ${outcome(job)}, ran ${seconds}s - result already delivered. Log: ${job.logPath}`;
+// A settled job's wait return: status only. The completion rides the steer
+// armed alongside this line; pointers ride boundaries (start message,
+// completion), never pulls.
+function statusLine(job: BgJob): string {
+	return `${job.id} ${outcome(job)}.`;
 }
 
-// The still-running line: synchronization status only, never an output tail
-// - progress inspection stays a deliberate log read. For a subagent the
-// useful pointer is the diagnostics file: the result file stays empty until
-// the child's final response lands.
+// The still-running line: synchronization status only - never an output
+// tail, and no pointer: the start message carries the standing log path,
+// and pointers ride boundaries, not pulls.
 function stillRunningLine(job: BgJob): string {
 	const elapsed = fmtElapsedMs(Date.now() - job.startedAt);
 	const total = jobTotalMs(job);
-	return `${job.id} still running, ${total !== undefined ? `${elapsed} / ${fmtTotalMs(total)}` : elapsed}. Log: ${logPointer(job)}`;
+	return `${job.id} still running, ${total !== undefined ? `${elapsed} / ${fmtTotalMs(total)}` : elapsed}.`;
 }
 
-// Where a "still running" pointer should lead: the bash log, a subagent's
-// diagnostics (its result file is empty until completion).
-function logPointer(job: BgJob): string {
-	return job.kind === "subagent" ? job.errPath : job.logPath;
-}
-
-// The all-wait return: every job this session started, headed per job - the
-// full completion text for the ones this wait claims, a one-liner for results
-// already in context. `claimed` is the authoritative claim set resolveWaiters
-// marked, passed only when the wait ended settled; any other end recomputes;
-// an empty claim from a timeout/abort leg must never read as "nothing was
-// undelivered" while settled-but-undelivered jobs exist.
-function composeAllWait(claimed: BgJob[] | undefined): string {
+// The all-wait return: one status line per settled job, in start order.
+// Delivery is armed for every settled job (idempotent - an armed or
+// suppressed job no-ops), so the completions arrive alongside this result.
+function composeAllWait(): string {
 	const settled = [...registry().jobs.values()]
 		.filter((job) => !isLive(job))
 		.sort((a, b) => a.startedAt - b.startedAt);
-	const full = claimed ?? settled.filter((job) => !job.notified);
-	for (const job of full) job.notified = true;
-	if (full.length === 0) return "No background jobs pending.";
-	return settled.map((job) => (full.includes(job) ? `${job.id}\n${completionText(job)}` : deliveredOneLiner(job))).join("\n\n");
+	if (settled.length === 0) return "No background jobs pending.";
+	for (const job of settled) deliver(job);
+	return settled.map(statusLine).join("\n");
 }
 
 function abortAllText(): string {
@@ -840,9 +836,8 @@ function pollTick(): void {
 			job.endedAt = Date.now();
 		}
 	}
-	// Waiters claim before the deliver pass: a wait satisfiable this tick
-	// marks its job notified here, so deliver() never duplicates what the
-	// wait returns - wait wins in the same tick.
+	// Waiters resolve before the deliver pass: a wait satisfiable this tick
+	// returns beside the steer the same tick arms.
 	resolveWaiters();
 	for (const job of reg.jobs.values()) {
 		deliver(job);
@@ -863,10 +858,10 @@ function attach(handle: ExtensionAPI): void {
 }
 
 const BACKGROUND_CONTRACT =
-	"Set background:true to run a command detached and continue other work: the call returns at once with a job id and a log path, and the result is delivered to you automatically as a follow-up message when the command finishes - do not poll or sleep-wait. wait returns a background job's result in this turn and no follow-up fires for a job it returns; the log is for progress while the job runs. timeout, if set, limits total runtime including time in the background. Stop a running background job with stop.";
+	"Set background:true to run a command detached and continue other work: the call returns at once with a job id and the log path, and when the command finishes its result is delivered to you automatically as its own message - it arrives between your tool calls while you keep working, or wakes an idle session; do not poll or sleep-wait. wait blocks until a job finishes and returns status only; the log path from the start message is for progress while the job runs. timeout, if set, limits total runtime including time in the background. Stop a running background job with stop.";
 
 const SUBAGENT_CONTRACT =
-	"Launch a subagent: a fresh Pi session in this working directory that carries out a task independently. The child starts from the task and ordinary project instructions - never this conversation - with ordinary tools but no subagent tool of its own (no recursive agents). Start is asynchronous: the call returns at once with a job id (sa-N). Its final response is delivered here automatically when it finishes, or returned in-turn by wait; stop terminates a running child. The child model is user-configured, not chosen per call.";
+	"Launch a subagent: a fresh Pi session in this working directory that carries out a task independently. The child starts from the task and ordinary project instructions - never this conversation - with ordinary tools but no subagent tool of its own (no recursive agents). Start is asynchronous: the call returns at once with a job id (sa-N). When it finishes, the final response is delivered here automatically as its own message - between your tool calls while you keep working, or waking an idle session; wait blocks until then and returns status only; stop terminates a running child. The child model is user-configured, not chosen per call.";
 
 export default function (handle: ExtensionAPI) {
 	// Bound at factory time, not only at session_start: a completion may land
@@ -879,7 +874,7 @@ export default function (handle: ExtensionAPI) {
 		parameters: Type.Object({
 			...builtin.parameters.properties,
 			background: Type.Optional(
-				Type.Boolean({ description: "Run detached and deliver the result as an automatic follow-up message when it finishes" }),
+				Type.Boolean({ description: "Run detached; when it finishes the result arrives automatically as its own message between your tool calls" }),
 			),
 		}),
 		async execute(toolCallId, params, signal, onUpdate, ctx) {
@@ -900,7 +895,7 @@ export default function (handle: ExtensionAPI) {
 							`Command: ${oneLine(input.command)}`,
 							`Output streams to ${job.logPath} - read it anytime for progress while the job runs.`,
 							job.deadlineAt !== undefined ? `Deadline: ${input.timeout}s total runtime.` : "No deadline.",
-							"The result will be delivered here automatically when it finishes, or returned in-turn by wait - continue other work instead of polling.",
+							"When it finishes, the result is delivered here automatically - it arrives between your tool calls; wait blocks until then and returns status only. Continue other work instead of polling.",
 						].join("\n"),
 					},
 				],
@@ -926,12 +921,13 @@ export default function (handle: ExtensionAPI) {
 			}
 			if (job.state !== "running" && job.state !== "stopping") {
 				const seconds = Math.round(((job.endedAt ?? Date.now()) - job.startedAt) / 100) / 10;
-				const where = job.kind === "subagent" ? `Result: ${job.logPath}` : `Output: ${job.logPath}`;
+				// Status only: pointers ride boundaries (start message, completion),
+				// never pulls.
 				return {
 					content: [
 						{
 							type: "text",
-							text: `${job.id} already finished: ${outcome(job)}, ran ${seconds}s. ${where}`,
+							text: `${job.id} already finished: ${outcome(job)}, ran ${seconds}s.`,
 						},
 					],
 					details: { id: job.id, state: job.state },
@@ -948,7 +944,7 @@ export default function (handle: ExtensionAPI) {
 		name: "wait",
 		label: "Wait for background job",
 		description:
-			"Wait for a background job (a bash command started with background:true, or a subagent) that this session started and get its result in this turn: the completion that would have arrived as a follow-up message is returned by this call instead - no follow-up fires for a job wait returns. Give id (bg-N or sa-N) to wait for one job, or all: true to wait until no background job is still running; jobs whose results were already delivered get a one-line pointer. timeout (seconds) bounds the wait; on expiry each still-running job gets one line with its log path, never an output tail. Aborting the call ends the wait only - the job keeps running.",
+			"Wait for a background job (a bash command started with background:true, or a subagent) that this session started, until it finishes: the call returns status only - one line per job, never an output tail - and the full completion is delivered as its own message alongside this result. Give id (bg-N or sa-N) to wait for one job, or all: true to wait until no background job is still running. timeout (seconds) bounds the wait; on expiry each still-running job gets one status line. Aborting the call ends the wait only - the job keeps running.",
 		parameters: Type.Object({
 			id: Type.Optional(Type.String({ description: "Job id returned by a background bash call (bg-N) or a subagent call (sa-N)" })),
 			all: Type.Optional(Type.Boolean({ description: "Wait until no background job from this session is still running" })),
@@ -975,25 +971,20 @@ export default function (handle: ExtensionAPI) {
 					details: { id: input.id, found: false },
 					};
 				}
-				// Already settled: the full completion text if the follow-up never
-				// fired, a one-line pointer if it did (the model has it in
-				// context). Synchronous - no tick can deliver in between.
+				// Already settled: arm the carrier (idempotent - an armed or
+				// suppressed job no-ops) and return status only; the steer is queued
+				// synchronously, before this tool result reaches the model, so the
+				// completion arrives with the next request.
 				if (!isLive(job)) {
-					if (job.notified) {
-						return {
-							content: [{ type: "text", text: deliveredOneLiner(job) }],
-							details: { id: job.id, state: job.state, delivered: true },
-						};
-					}
-					job.notified = true;
+					deliver(job);
 					return {
-						content: [{ type: "text", text: completionText(job) }],
+						content: [{ type: "text", text: statusLine(job) }],
 						details: { id: job.id, state: job.state, exitCode: job.exitCode ?? null, logPath: job.logPath },
 					};
 				}
 				if (signal?.aborted) {
 					return {
-						content: [{ type: "text", text: `Wait aborted - ${job.id} still running, untouched. Log: ${logPointer(job)}` }],
+						content: [{ type: "text", text: `Wait aborted - ${job.id} still running, untouched.` }],
 						details: { id: job.id, aborted: true },
 					};
 				}
@@ -1033,19 +1024,12 @@ export default function (handle: ExtensionAPI) {
 						break;
 					}
 					// Compose from state, not from the winning leg: a job that
-					// settled as the wait ended must not lose its completion.
+					// settled as the wait ended must not lose its completion - arm
+					// the carrier and return status beside it.
 					if (!isLive(job)) {
-						if (end !== "settled" && job.notified) {
-							return {
-								content: [{ type: "text", text: deliveredOneLiner(job) }],
-								details: { id: job.id, state: job.state, delivered: true },
-							};
-						}
-						// The wait claims the completion: resolveWaiters already marked
-						// it, or an out-of-band settle is marked here.
-						job.notified = true;
+						deliver(job);
 						return {
-							content: [{ type: "text", text: completionText(job) }],
+							content: [{ type: "text", text: statusLine(job) }],
 							details: { id: job.id, state: job.state, exitCode: job.exitCode ?? null, logPath: job.logPath },
 						};
 					}
@@ -1056,7 +1040,7 @@ export default function (handle: ExtensionAPI) {
 						};
 					}
 					return {
-						content: [{ type: "text", text: `Wait aborted - ${job.id} still running, untouched. Log: ${logPointer(job)}` }],
+						content: [{ type: "text", text: `Wait aborted - ${job.id} still running, untouched.` }],
 						details: { id: job.id, aborted: true },
 					};
 				} finally {
@@ -1069,26 +1053,24 @@ export default function (handle: ExtensionAPI) {
 			// all: true - resolve when no live job remains; settled-but-undelivered
 			// jobs contribute their texts, everything else a one-liner.
 			if (liveJobs().length === 0) {
-				return { content: [{ type: "text", text: composeAllWait(undefined) }], details: { all: true, pending: 0 } };
+				return { content: [{ type: "text", text: composeAllWait() }], details: { all: true, pending: 0 } };
 			}
 			if (signal?.aborted) {
 				return { content: [{ type: "text", text: abortAllText() }], details: { all: true, aborted: true } };
 			}
-			let claimed: BgJob[] | undefined;
 			const allWaiter: AllWaiter = { resolve: () => {} };
 			const allSettleP = new Promise<WaitEnd>((resolve) => {
 				let ended = false;
-				allWaiter.resolve = (end, jobs) => {
+				allWaiter.resolve = (end) => {
 					// First end wins: a late abort firing after resolveWaiters
-					// claimed must not overwrite the claim.
+					// resolved must not overwrite the end.
 					if (ended) return;
 					ended = true;
-					claimed = jobs;
 					resolve(end);
 				};
 			});
 			allWaiters.add(allWaiter);
-			const onAllAbort = (): void => allWaiter.resolve("abort", []);
+			const onAllAbort = (): void => allWaiter.resolve("abort");
 			let allTimer: ReturnType<typeof setTimeout> | undefined;
 			try {
 				let end: WaitEnd = "settled";
@@ -1121,11 +1103,10 @@ export default function (handle: ExtensionAPI) {
 					break;
 				}
 				if (liveJobs().length === 0) {
-					// Trust resolveWaiters' claim only for a settled end: the
-					// timeout/abort legs carry an empty claim, which must not mask
-					// undelivered jobs - recompute from state instead.
+					// Status lines for every settled job; composeAllWait arms any
+					// delivery the poller has not reached, whatever the end was.
 					return {
-						content: [{ type: "text", text: composeAllWait(end === "settled" ? claimed : undefined) }],
+						content: [{ type: "text", text: composeAllWait() }],
 						details: { all: true },
 					};
 				}
@@ -1175,7 +1156,7 @@ export default function (handle: ExtensionAPI) {
 								`Subagent ${job.id} started (pid ${job.pid}).`,
 								`Task: ${oneLine(task)}`,
 								`Model: ${model}`,
-								`The final response will be delivered here automatically when it finishes, or returned in-turn by wait - continue other work instead of polling.`,
+								`When it finishes, the final response is delivered here automatically - it arrives between your tool calls; wait blocks until then and returns status only. Continue other work instead of polling.`,
 								`No intermediate progress: ${job.errPath} collects diagnostics if it fails; the result lands in ${job.logPath} at completion.`,
 							].join("\n"),
 						},
