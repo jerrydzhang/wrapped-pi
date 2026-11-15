@@ -42,6 +42,7 @@
         cp -R ${./extensions} extensions
         chmod -R u+w extensions
         node --import ./extensions/tests/register.mjs --test extensions/tests/wait-runtime.test.ts
+        node --test extensions/tests/worker-inspector.runtime.test.ts
         touch "$out"
       '';
       extensions = pkgs.runCommand "wrapped-pi-extension-tests" {
@@ -54,6 +55,7 @@
         node --import ./extensions/tests/register.mjs --test extensions/tests/subagent.test.ts
         node --test extensions/tests/pdf-read.test.ts
         node --test extensions/tests/pdf-read.poppler.test.ts
+        node --test extensions/tests/worker-rpc.test.ts extensions/tests/worker-state.test.ts extensions/tests/worker-inspector.test.ts extensions/tests/ascii.test.ts
         touch "$out"
       '';
     });

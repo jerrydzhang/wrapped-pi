@@ -2,7 +2,7 @@
 
 Pinned native Pi with bundled [web search](extensions/websearch.md),
 [background jobs](extensions/bash-background.md) (detached commands and
-subagents with a shared wait/stop lifecycle), and
+conversational workers with shared delivery/stop and a yielding `wait`), and
 [PDF-capable read](extensions/pdf-read.md) (Poppler from the package
 closure; non-PDF reads unchanged).
 
@@ -29,6 +29,11 @@ exports `WRAPPED_PI_EXTENSIONS` (its pinned
 `-e` list) so subagent children load the bundled set, `extraExtensions`
 included. See [the extension's documentation](extensions/bash-background.md)
 for the full contract.
+
+Workers retain their conversation within the parent session, including
+`/reload`. Use `message` for follow-ups or questions, `/bg` to open live worker
+conversations, and `wait {}` to yield when there is nothing useful to do.
+Human input and incoming results resume the parent without cancelling jobs.
 
 If these extensions were previously installed globally, remove those managed
 copies explicitly before adopting the wrapper to avoid duplicate loading.
@@ -59,6 +64,10 @@ node --import ./extensions/tests/register.mjs --test extensions/tests/bash-backg
 node --import ./extensions/tests/register.mjs --test extensions/tests/subagent.test.ts
 node --test extensions/tests/pdf-read.test.ts
 node --test extensions/tests/pdf-read.poppler.test.ts   # real Poppler; skips without it
+node --test extensions/tests/worker-*.test.ts extensions/tests/ascii.test.ts
 ```
+
+`nix flake check` also runs `wait-runtime.test.ts` against the pinned Pi agent
+loop with deterministic model responses, without credentials or network calls.
 
 The SDK stub loader is specific to the bash suite; do not apply it to websearch.

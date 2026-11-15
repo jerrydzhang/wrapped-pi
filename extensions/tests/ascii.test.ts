@@ -12,14 +12,21 @@ import assert from "node:assert/strict";
 test("production extension sources are ASCII-only", () => {
 	const dir = new URL("..", import.meta.url).pathname;
 	const offenders: string[] = [];
-	for (const entry of readdirSync(dir)) {
-		// Top-level *.test.ts (websearch) is suite code with data fixtures, not production.
-		if (!entry.endsWith(".ts") || entry.endsWith(".test.ts")) continue;
-		const text = readFileSync(join(dir, entry), "utf8");
-		for (const [index, line] of text.split("\n").entries()) {
-			const match = line.match(/[^\x00-\x7F]/);
-			if (match) offenders.push(`${entry}:${index + 1}: ${JSON.stringify(match[0])}`);
+	function inspect(folder: string, prefix = ""): void {
+		for (const entry of readdirSync(folder, { withFileTypes: true })) {
+			const name = prefix + entry.name;
+			if (entry.isDirectory()) {
+				if (entry.name !== "tests") inspect(join(folder, entry.name), `${name}/`);
+				continue;
+			}
+			if (!entry.name.endsWith(".ts") || entry.name.endsWith(".test.ts")) continue;
+			const text = readFileSync(join(folder, entry.name), "utf8");
+			for (const [index, line] of text.split("\n").entries()) {
+				const match = line.match(/[^\x00-\x7F]/);
+				if (match) offenders.push(`${name}:${index + 1}: ${JSON.stringify(match[0])}`);
+			}
 		}
 	}
+	inspect(dir);
 	assert.deepEqual(offenders, [], "non-ASCII in production sources");
 });

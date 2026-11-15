@@ -1,186 +1,184 @@
 # bash-background
 
-A Pi extension that adds generic background jobs to a session: detached
-commands through the `bash` tool, and subagents that relaunch Pi itself on a
-task. Both kinds share one lifecycle - a background start returns at once,
-and when the job finishes its completion is delivered to the session
-automatically: it enters between the model's tool calls while a run is
-active, or wakes an idle session. When nothing useful remains to do, `wait`
-ends the model's turn while jobs keep running; results arrive either way.
+Generic background bash jobs and conversational Pi workers, with shared
+visibility, automatic delivery, stop, and cleanup. Independently authored;
+no third-party subagent framework and no Saccade-specific runtime semantics.
 
-Independently authored; no third-party extension code. Bundled by the
-wrapped-pi executable without installing files into Pi's configuration.
+## Tools
 
-## What it adds
+### `bash { command, background?: true, timeout? }`
 
-- **`bash` with `background: true`** — the only command execution path. Ordinary
-  calls (no `background`) delegate to Pi's built-in bash unchanged: same
-  errors, streaming, rendering, truncation, cwd, and environment.
-- A background call returns at once with a session-local job reference
-  (`bg-N`), the pid, and a temporary output-log path. Reading that log (with
-  the ordinary `read` tool) is for progress while a job runs; the completion
-  itself arrives as its own message — `stop`'s result is the outcome, and
-  `wait` ends the turn when nothing useful remains.
-- **`subagent { task }`** — launches one child Pi in the same working
-  directory with fresh context: the task and ordinary project instructions
-  (AGENTS.md and friends), never the parent conversation. The child gets the
-  ordinary tool set and extension discovery, plus the bundled extensions the
-  wrapper pins (see Configuration), but no `subagent` tool of its own — that
-  removal is ordinary recursion prevention, not a security boundary; a child
-  can still launch Pi through `bash`. No role definitions, routing, chains,
-  sandboxing, or resumable conversations: one task, one final response.
-- The call returns at once with a job id (`sa-N`). The successful result is
-  the child's **final assistant response** — not its tool transcript —
-  delivered automatically when the child finishes.
-  result is capped at its own byte budget (64 KiB, no line cap; a command
-  output's 20-line tail rules do not apply), with the full text kept at the
-  result path. Failures report the exit code and a diagnostics tail (the
-  child's stderr) without flooding context. While a child runs there is no
-  intermediate progress to read: print mode writes the final response only at
-  the end.
-- **Automatic completion delivery** — a custom message (never user voice)
-  delivered with Pi's `steer` carrier: while a run is active it enters at the
-  next turn boundary — between the model's tool calls, before its next
-  request — and the agent loop cannot end a run with steered messages queued,
-  so a completion armed mid-run is always consumed inside that run, never a
-  trailing wake; an idle session is woken instead (triggerTurn). Content
-  names the job, the outcome, the runtime, a bounded tail, and —
-  unconditionally — the full-output path: the completion is the terminal
-  carrier of the log path, present on every branch.
-- **`wait`** — the conversational yield: when nothing useful remains to do
-  while background jobs run, the model calls `wait` alone (no arguments,
-  nothing else in the turn) and the turn ends there. The call first arms
-  every finished-but-undelivered completion — each exactly once, as its own
-  message, which the run then consumes before it ends — and names what is
-  still running; jobs keep running and their completions arrive
-  automatically later, between tool calls in a future run or waking an idle
-  session. Human input also starts a response normally: no cancellation or
-  Escape is required to speak through a wait. With no jobs it yields to the
-  human the same way, without making another model request. Legacy arguments (`id`,
-  `all`, `timeout`) are refused with the current usage — by the strict
-  schema and again in execute. The tool is `model-only`: declared to the
-  model, never callable from codemode scripts, so a script cannot end a
-  run. Pointers ride boundaries — the start message carries the standing
-  log path, the completion carries it terminally — and no pull (`wait` or
-  `stop`) repeats them.
-- **`stop {id}`** — stops a background job this session started (either kind)
-  by terminating its process group (SIGTERM, then SIGKILL), and reports the
-  observed outcome honestly; it does not claim settlement that did not happen.
-  The stop result is the outcome — no completion message follows for a job you
-  stopped. Stopping a subagent also cleans up after the child: Pi's print mode
-  traps SIGTERM, kills its own detached children, and runs its shutdown hooks
-  (including this extension's, so the child's background jobs stop too).
-  Because that shutdown escalates against the child's own detached jobs on the
-  same TERM-then-KILL ladder, the parent gives a subagent a bounded extra
-  grace (5s versus a command's 2s) before SIGKILL, so a child still
-  escalating is not killed mid-cleanup — which would orphan the detached
-  group it was about to kill (reproduced live and regression-tested). If a
-  job survives SIGKILL all the same, the stop says so and the job stays
-  running.
-- **Footer status** — while any background job is running, the footer carries
-  one dim line naming each live job with a timer: `bg-1 34s` for an untimed
-  command, `bg-2 10s/1m30s` for one with a `timeout` (elapsed/total),
-  `sa-1 12s` for a subagent. It refreshes on the poller's own tick and clears
-  the moment nothing is pending, so an idle session with jobs running is
-  visibly different from an idle session with nothing pending.
-- **`/bg`** — a snapshot card in the transcript listing this session's live
-  background jobs, commands and subagents alike (id, elapsed at check,
-  elapsed/total when timed, the command or task capped to one 80-char line,
-  and the log path in the entry data). Custom entries never enter
-  LLM context: the model cannot see the check, and the card stays an honest
-  record in scrollback and on disk.
-- **`timeout`** (bash only) keeps the bash tool's existing convention: omitted
-  means no deadline; a positive value limits total runtime, including time
-  spent in the background. A command stopped at its deadline is reported
-  through the normal completion message. Subagents take no per-call timeout.
+Foreground calls delegate to Pi's built-in bash: same streaming, rendering,
+errors, working directory, truncation, and timeout behavior. Background calls
+return immediately with a session-local `bg-N`, pid, and private temporary log.
+The result arrives automatically as an extension-authored message between tool
+calls, or wakes an idle parent. Read the log for useful progress inspection,
+not repeated status polling. Completion includes a bounded tail and the full
+log path; `stop` reports its own outcome instead of sending another completion.
 
-## Subagent configuration
+A positive `timeout` limits total command runtime, including time in the
+background. Omitted means no deadline. This does not impose a worker deadline.
 
-One user-authored file, plus the wrapper's internal launch plumbing. The
-wrapper convention holds: nothing is installed into or written under `~/.pi`,
-normal Pi configuration (auth included) is inherited untouched by children,
-and `wrapped-pi.json` is yours to author.
+### `wait {}`
 
-- **`<agent-dir>/wrapped-pi.json`** (required for `subagent`) — the child's
-  model. The agent directory is resolved exactly as Pi resolves it
-  (`PI_CODING_AGENT_DIR` respected, default `~/.pi/agent`). One field:
-  `{"model": "provider/model-id"}` — any pattern `pi --model` accepts (for
-  example `anthropic/claude-haiku-*`); whitespace is trimmed and unknown keys
-  are tolerated. The file is read afresh at every launch, so edits apply to
-  the next subagent without restarting Pi. The caller does not choose a model
-  per invocation, and there is **no silent fallback to the session model**
-  and no precedence: with the file missing or unreadable, invalid JSON, or a
-  missing, non-string, or blank `model`, the tool refuses and names the file
-  and the cause. A pattern that does not resolve makes the child exit
-  nonzero; the job reports the failure with the child's diagnostics. A
-  settings command is future work — today the file is the whole interface.
-- **`WRAPPED_PI_EXTENSIONS`** (exported by the wrapper) — the same
-  store-pinned extension list the wrapper passes as `-e`, newline-separated,
-  so children load the bundled set including consumer `extraExtensions`.
-  Verified against Pi 1.2.0: passing a `-e` path that discovery also finds
-  loads that extension once, not twice. Without the variable (plain
-  `pi -e bash-background.ts` development use), children start with ordinary
-  discovery only.
+**When nothing useful remains to do, call wait alone.** It is a conversational
+yield, not a blocking job barrier: Pi ends the run without requesting another
+model response. Human messages, worker messages/replies, and command completions
+resume the parent through ordinary input and automatic delivery. No Escape or
+cancellation is needed to speak to a waiting agent.
 
-Children are launched as `pi --print --no-session --model <pattern> [-e
-path...] -- <task>` in the session's working directory, inheriting the
-process environment minus the parent's `PI_*` session variables (Pi's own
-nested-Pi hygiene; the child sets its own). The child marker
-(`WRAPPED_PI_CHILD=1`) is set in the child environment and removes the
-`subagent` tool there. Context files such as AGENTS.md load regardless of
-project trust; protected `.pi` resources follow the user's saved trust
-decisions, which in non-interactive mode means skipped when the default
-(`ask`) applies — the extension does not pass `--approve` on your behalf.
+- Jobs and worker conversations stay alive.
+- Already-pending results are delivered before yielding. Consumed history is
+  never replayed to release a future wait.
+- With no background work, yield to the human the same way.
+- Explicit queued follow-ups keep Pi's normal end-of-run semantics.
+- Call wait in its own tool batch. A nonterminating sibling tool prevents Pi
+  from ending the run; ordinary foreground tools are not made interruptible.
+- The old `id`, `all`, and `timeout` arguments are deliberately removed and
+  refused. Dependencies belong in the agent's reasoning, not wake-up filters.
+- Wait is `model-only`, not callable from codemode scripts. Internally it uses
+  Pi's native `terminate: true` tool-result contract, without timers, waiter
+  promises, or input interception. Other extensions can still request their
+  own continuation at Pi's normal boundaries.
 
-Credentials are never inspected, copied, or printed by the extension;
-children authenticate the way any Pi run does from the inherited
-environment and configuration.
+### `subagent { task }`
 
-## Session lifecycle
+Launches one addressable worker in the same working directory, returning a
+stable `sa-N`, its configured model, and transcript/diagnostic paths. Initial
+context is the task plus ordinary project instructions, **never the parent
+conversation**. Children retain ordinary tools and bundled extensions, but
+cannot use `subagent` recursively. This is recursion prevention, not a security
+boundary: a child can still launch programs through bash.
 
-- Extension reload (`/reload`) keeps background jobs running (subagents
-  included) and reconnects their delivery to the same session. Settlement is
-  recovered from child-side evidence: the wrapper shell around each job
-  appends a nonce-tagged exit marker, so a reloaded instance recovers a
-  subagent's exit code and final response from the result file.
-- Quit, `/new`, `/resume` to another session, or `/fork` stops the jobs that
-  session started, subagents' descendants included (see `stop` above).
-  A replaced session never adopts an old session's jobs.
-- **Limitation:** hard process death (crash, SIGKILL) runs no shutdown hooks;
-  detached jobs may keep running and their output remains in the log files,
-  but no completion is ever delivered. There is no orphan watcher by
-  design.
+A worker is one long-lived Pi RPC subprocess with an in-memory conversation.
+After completing a turn it becomes **idle**, not destroyed. Replies arrive
+automatically; use `message` with the same id for another turn. A failed model
+turn is reported without pretending its task succeeded, and can receive a
+follow-up if its process remains alive. Process termination closes the address.
+There is no per-call model override or task timeout.
 
-## Loading
+### `message { id, message }`
 
-Run `nix run .` to launch wrapped-pi with this extension. It preserves normal
-Pi configuration and extension discovery; no global installation is needed.
-Create `<agent-dir>/wrapped-pi.json` (see [Subagent configuration](#subagent-configuration))
-to enable `subagent`.
+- In the parent, `id` is an existing `sa-N`. Send instructions, follow-up work,
+  or answers. Busy workers receive messages at supported Pi turn boundaries;
+  idle workers start a new turn in the **same conversation**. A non-agent busy
+  boundary (for example manual compaction from another extension) can refuse
+  explicitly without submitting; resubmit after that operation settles.
+- In a child, the only destination is `id: "parent"`. Send progress, questions,
+  or blockers before finishing, then continue useful work or call wait alone.
+  Sibling messaging is not supported.
+- Messages are explicitly attributed. Parent/human messages reach a child as
+  custom messages, not fabricated human chat; child reports reach the parent
+  as extension-authored messages identifying the worker and whether it was
+  responding to parent or direct human input.
+- Success means submission, not proof of reading, agreement, or completion.
+  Text is limited to 16 KiB; put longer details in a file and send its path.
 
-For source development, load `extensions/bash-background.ts` directly with
-plain Pi: `pi -e /path/to/this/repo/extensions/bash-background.ts`.
+Worker replies have a 64 KiB byte budget, without bash's 20-line tail cap.
+The full structured event transcript is always available at its log path.
+Tool transcripts are available to the human inspector, not automatically
+injected into parent model context. A worker finishing a turn and its process
+exiting are distinct events.
 
-Pi shows a one-time notice when an extension overrides the built-in `bash`
-tool; it is expected and harmless.
+### `stop { id }`
 
-## Honest boundaries
+Stops a bash job or a working/idle worker by id. A worker's stdin is closed for
+orderly shutdown; the shared process-group TERM-then-KILL ladder provides a
+bounded backstop. Workers receive 5 seconds of TERM grace versus bash's 2
+seconds, allowing their own detached-job cleanup to escalate before the parent
+kills them. Surviving or unsignalable groups are reported honestly, not falsely
+claimed stopped. An explicit stop suppresses further automatic replies;
+its result is the outcome.
 
-- Foreground behavior is the built-in implementation, called directly — not a
-  reimplementation.
-- Background commands inherit the session process environment (including any
-  task/routing variables the launching harness injected) plus the `PI_*`
-  session variables Pi's own bash tool sets, reproduced through the public
-  extension API. The built-in's internal shell-environment augmentation is
-  approximated, so background environment is not claimed bit-for-bit identical.
-- Subagents are one detached child process each — no framework: no queue, no
-  worker pool, no resumption, no steering. A child that outlives a SIGKILL
-  stop is reported, not hunted.
-- Output logs are plain temporary files under the OS temp directory, used only
-  for result retrieval and mid-run inspection; there are no job records, no
-  persistence, no recovery, and no model-facing list/status/output tools
-  (`wait` is a conversational turn-yield over jobs the session started, not
-  job tooling) — this is not a job platform.
-  Human-facing visibility (the footer line and the `/bg` card) is read-only
-  over in-memory state.
-- No Saccade semantics anywhere: the extension is fully generic.
+## Human observability
+
+The footer shows running bash jobs with elapsed time (and total when timed),
+plus worker phases such as `sa-2 working 12s` and `sa-2 idle`. Idle workers
+remain visible and stoppable.
+
+**`/bg`** opens the live job/worker inspector. **`/bg sa-N`** opens that worker's
+conversation directly. Bash jobs appear alongside workers.
+
+- List: arrows select, Enter opens, Escape or `q` closes.
+- Conversation: live assistant text, tool activity/results, messages, state,
+  model, elapsed time, and the full event-log path.
+- Arrows/PageUp/PageDown scroll; Home goes to the top, End follows the live
+  tail again. `m` composes a direct human message to a worker; `x` confirms
+  termination. Escape returns to the list; `q` closes.
+- Inspection and direct human messages do not add transcript dumps to the
+  parent's model context. The worker can still reply/report back normally.
+
+This opens and controls the **actual live worker conversation** through the
+parent's single RPC connection. It does not launch a second Pi session, copy a
+saved conversation, or attach a second terminal driver. It is an inspector,
+not the complete native child Pi TUI. Non-TUI `/bg` retains a read-only snapshot
+entry; custom terminal UI is not available over RPC.
+
+The inspector retains a bounded 128 KiB finalized transcript window plus a
+bounded live response, wraps by terminal columns, sanitizes terminal controls,
+and limits the wrapped view to 4000 lines.
+The complete JSONL event log remains on disk. Closed/reloaded inspectors stop
+their refresh timers.
+
+## Configuration and loading
+
+Create **`<agent-dir>/wrapped-pi.json`** with:
+
+```json
+{"model": "provider/model-id"}
+```
+
+Pi's agent-directory convention applies (`PI_CODING_AGENT_DIR`, otherwise
+`~/.pi/agent`). Any model pattern accepted by `pi --model` is allowed. The file
+is read afresh on every launch; whitespace is trimmed and unknown keys are
+tolerated. Missing/unreadable/invalid JSON or a missing/non-string/blank model
+refuses explicitly, naming the file. There is **no silent fallback** to the
+parent model and no per-invocation model selection. Unresolvable models and
+startup failures report diagnostics; partially started children are cleaned up.
+
+The wrapper exports **`WRAPPED_PI_EXTENSIONS`**, its newline-separated,
+store-pinned `-e` list, including consumer `extraExtensions`. Workers inherit
+that list and always load this extension for their inbox and message tool.
+Plain `pi -e ./extensions/bash-background.ts` development therefore works too.
+The child marker `WRAPPED_PI_CHILD=1` removes recursive subagent access.
+
+Run `nix run .` for the bundled wrapper, or develop with:
+
+```sh
+pi --no-session -e ./extensions/bash-background.ts
+```
+
+Children use the same Pi interpreter/CLI entry as their parent, with
+`--mode rpc --no-session --model <configured-pattern>`, in the parent cwd.
+Task text travels through RPC, not shell interpolation. Normal configuration,
+authentication, and discovery are inherited; parent `PI_*` session variables
+are removed so the child sets its own. No credentials are inspected, copied,
+or printed, and the wrapper installs nothing into `~/.pi`.
+
+Project instructions load normally. Protected project resources follow Pi's
+saved trust decisions; no `--approve` is supplied. Headless child extension
+permission/auth/question dialogs are **declined**, never auto-approved, with
+an attributed notice to the parent. Workers should use `message` for questions.
+
+## Lifecycle and limits
+
+- Parent `/reload` keeps jobs and worker conversations alive. One RPC transport
+  and stdout reader survive in process-global state; the replacement extension
+  rebinds observation/delivery without respawning the child or adding a driver.
+  Bash exit status is recovered from the existing nonce-tagged log marker.
+- Quit, `/new`, changing sessions, and `/fork` stop that session's jobs,
+  including idle workers and worker-owned background descendants. Replacement
+  sessions never adopt old workers.
+- There is no cross-restart worker persistence, resumption framework, worker
+  pool, roles, routing, chains, schedules, automatic worktrees, or peer network.
+- Logs are private temporary files (0600); the complete event log can grow on
+  disk like a bash output log. RPC frames are bounded in memory, and malformed
+  protocol closes the child input and triggers shared cleanup. Excessive
+  undelivered worker mail produces an explicit error and stops the worker;
+  additional content remains in the event log rather than growing parent RAM.
+- Hard parent process death cannot run cleanup hooks. Bash jobs may survive;
+  RPC pipe closure requests orderly child shutdown but is not an orphan-reaping
+  guarantee. There is no separate watcher or supervisor.
+- Foreground bash is the built-in implementation. Background shell environment
+  reproduces Pi's public session variables but is not claimed bit-for-bit
+  identical to every internal shell augmentation.

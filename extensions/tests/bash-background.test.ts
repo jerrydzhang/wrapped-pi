@@ -509,3 +509,26 @@ test("wait arms a takeover job's pending completion after reload", async () => {
 	assert.match(second.sent[0].message.content, /reload-wait-arm/);
 	assert.equal(first.sent.length, 0, "the stale instance never delivers");
 });
+
+test("delivery waits through non-agent busy boundaries but still steers an active run", async () => {
+	const app = fresh();
+	bashBackground(app.handle);
+	let idle = false;
+	const ctx = { ...testCtx("/tmp"), isIdle: () => idle, signal: undefined };
+	await app.emit("session_start", { reason: "startup" }, ctx);
+	await app.bash().execute("a", { command: "printf compact-safe", background: true }, undefined, undefined, ctx);
+	await waitFor(() => jobs()[0].state === "exited");
+	assert.equal(app.sent.length, 0, "manual-compaction-like busy state must not start another run");
+	ctx.signal = new AbortController().signal;
+	await waitFor(() => app.sent.length === 1);
+	assert.match(app.sent[0].message.content, /compact-safe/);
+	assert.equal(app.sent[0].options.deliverAs, "steer", "ordinary active runs retain steering delivery");
+	ctx.signal = undefined;
+	await app.bash().execute("b", { command: "printf idle-safe", background: true }, undefined, undefined, ctx);
+	await waitFor(() => jobs()[1].state === "exited");
+	assert.equal(app.sent.length, 1);
+	idle = true;
+	await waitFor(() => app.sent.length === 2);
+	assert.match(app.sent[1].message.content, /idle-safe/);
+	await app.emit("session_shutdown", { reason: "quit" }, ctx);
+});

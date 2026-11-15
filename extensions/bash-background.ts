@@ -3,6 +3,12 @@ import { randomBytes } from "node:crypto";
 import { accessSync, closeSync, fstatSync, openSync, readFileSync, readSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
+import { WorkerRpc } from "./lib/worker-rpc.ts";
+import {
+	applyWorkerRecord, newWorkerState, validateWorkerMessage,
+	WORKER_INBOX_COMMAND, WORKER_MESSAGE_ENTRY, type WorkerState,
+} from "./lib/worker-state.ts";
 import { Type } from "typebox";
 import { Box, Text } from "@earendil-works/pi-tui";
 import {
@@ -18,7 +24,7 @@ const POLL_MS = 500;
 const STOP_GRACE_MS = 2000;
 const STOP_POLL_STEP_MS = 100;
 const AFTER_KILL_MS = 1000;
-// A subagent's SIGTERM shutdown is not instant: the child's print mode runs
+// A subagent's SIGTERM shutdown is not instant: the child's RPC mode runs
 // its extension shutdown - which escalates against the child's own detached
 // jobs through the same TERM-then-KILL ladder (grace + kill windows) - before
 // it exits. The parent must outwait that whole cleanup, or its SIGKILL lands
@@ -42,16 +48,6 @@ const WRAPPER = [
 	"cmd=$1; nonce=$2; shift 2",
 	'"$@" "$cmd"; code=$?',
 	`printf "\\n${MARKER}:%s:%s\\n" "$nonce" "$code"`,
-].join("\n");
-
-// The subagent child: the same Pi the session runs in, relaunched headless
-// (print mode writes only the final assistant response to stdout). stdout is
-// captured to the result file, stderr to the diagnostics file, and the exit
-// marker lands in the result file - reload takeover reads all three back.
-const SA_WRAPPER = [
-	"out=$1; err=$2; nonce=$3; shift 3",
-	'"$@" >"$out" 2>"$err"; code=$?',
-	`printf "\\n${MARKER}:%s:%s\\n" "$nonce" "$code" >>"$out"`,
 ].join("\n");
 
 // User configuration for subagents: one user-authored JSON file in Pi's agent
@@ -91,8 +87,8 @@ interface JobCommon {
 	groupGone: boolean;
 }
 
-// Plain data only: a reloaded instance takes jobs over from marker reads, so
-// nothing process-bound or session-bound may live here.
+// Bash jobs are plain marker-recoverable data. RPC workers additionally hold
+// their one live transport; neither job kind retains a parent session context.
 interface BashJob extends JobCommon {
 	kind: "bash";
 	command: string;
@@ -105,10 +101,13 @@ interface SubagentJob extends JobCommon {
 	kind: "subagent";
 	task: string;
 	model: string;
-	/** The result file: the child's stdout (its final response) plus the exit marker. */
+	/** RPC event transcript (or a legacy print child's response/exit marker). */
 	logPath: string;
 	/** The child's stderr - diagnostics, surfaced on failure. */
 	errPath: string;
+	/** Single RPC owner, held across parent reload; absent on legacy print jobs. */
+	rpc?: WorkerRpc;
+	worker?: WorkerState;
 }
 
 type BgJob = BashJob | SubagentJob;
@@ -129,6 +128,8 @@ function registry(): Registry {
 }
 
 let pi: ExtensionAPI | undefined;
+// Module-local, rebound at session boundaries; never retained in worker state.
+let deliveryContext: ExtensionContext | undefined;
 
 // The ui surface this extension touches, captured at session boundaries.
 // Undefined in headless modes and in tests.
@@ -316,65 +317,82 @@ function configuredModel(): string {
 	return trimmed;
 }
 
-async function spawnSubagent(task: string, model: string, ctx: ExtensionContext | undefined): Promise<BgJob> {
-	// Relaunch the same Pi this session runs in: argv[1] is the CLI entry the
-	// host executed, execPath the interpreter running it.
+async function spawnSubagent(task: string, model: string, ctx: ExtensionContext | undefined): Promise<SubagentJob> {
 	const entry = process.argv[1];
 	if (typeof entry !== "string" || entry === "") {
 		throw new Error("Cannot locate the Pi CLI entry (process.argv[1] is empty); launching a subagent needs the running Pi command line.");
 	}
 	const cwd = ctx?.cwd ?? process.cwd();
-	try {
-		accessSync(cwd);
-	} catch {
+	try { accessSync(cwd); } catch {
 		throw new Error(`Working directory does not exist: ${cwd}\nCannot launch a subagent.`);
 	}
 	const stem = randomBytes(6).toString("hex");
-	const logPath = join(tmpdir(), `sa-${stem}.out`);
-	const errPath = join(tmpdir(), `sa-${stem}.err`);
-	const nonce = randomBytes(8).toString("hex");
-	const outFd = openSync(logPath, "wx", 0o600);
-	const errFd = openSync(errPath, "wx", 0o600);
+	const args = [entry, "--mode", "rpc", "--no-session", "--model", model];
+	// Always load this extension for the child's inbox and parent message tool,
+	// even in plain-pi development. Wrapper extras remain store-pinned.
+	for (const extension of new Set([...childExtensions(), fileURLToPath(import.meta.url)])) args.push("-e", extension);
+	const rpc = await WorkerRpc.start({
+		executable: process.execPath, args, cwd, env: childEnv(),
+		logPath: join(tmpdir(), `sa-${stem}.jsonl`), errPath: join(tmpdir(), `sa-${stem}.err`),
+	});
+	const reg = registry();
+	const job: SubagentJob = {
+		kind: "subagent", id: `sa-${reg.nextId++}`, task, model,
+		logPath: join(tmpdir(), `sa-${stem}.jsonl`), errPath: join(tmpdir(), `sa-${stem}.err`),
+		pid: rpc.pid, nonce: randomBytes(8).toString("hex"), startedAt: Date.now(),
+		state: "running", notified: false, stopping: false, groupGone: false,
+		rpc, worker: newWorkerState(),
+	};
+	reg.jobs.set(job.id, job);
+	bindWorker(job);
+	ensurePoller();
 	try {
-		const args = ["--print", "--no-session", "--model", model];
-		for (const extension of childExtensions()) args.push("-e", extension);
-		args.push("--", task);
-		const child = spawn("sh", ["-c", SA_WRAPPER, "sa", logPath, errPath, nonce, process.execPath, entry, ...args], {
-			cwd,
-			env: childEnv(),
-			detached: true,
-			stdio: "ignore",
-		});
-		// The armed reply must not lie: spawn failures surface here as errors.
-		await new Promise<void>((resolve, reject) => {
-			child.once("spawn", resolve);
-			child.once("error", reject);
-		});
-		child.on("error", () => {});
-		child.unref();
-		const reg = registry();
-		const job: BgJob = {
-			kind: "subagent",
-			id: `sa-${reg.nextId++}`,
-			task,
-			model,
-			logPath,
-			errPath,
-			pid: child.pid!,
-			nonce,
-			startedAt: Date.now(),
-			state: "running",
-			notified: false,
-			stopping: false,
-			groupGone: false,
-		};
-		reg.jobs.set(job.id, job);
-		ensurePoller();
+		// Pi refuses non-interactive startup without a valid model. Checking
+		// commands proves readiness without exporting a full model object (which
+		// can include user-authored provider headers) into the transcript log.
+		const commands = await rpc.request({ type: "get_commands" });
+		if (!commands?.commands?.some((command: { name: string }) => command.name === WORKER_INBOX_COMMAND)) {
+			throw new Error("Child Pi did not register its worker inbox.");
+		}
+		await rpc.request({ type: "prompt", message: task, streamingBehavior: "steer" });
 		return job;
-	} finally {
-		closeSync(outFd);
-		closeSync(errFd);
+	} catch (error) {
+		await stopJob(job, "stopped");
+		if (job.groupGone || rpc.exited) reg.jobs.delete(job.id);
+		throw new Error(`Cannot start ${job.id}: ${(error as Error).message}. Diagnostics: ${job.errPath}${isLive(job) ? `; stop ${job.id} to retry cleanup` : ""}`);
 	}
+}
+
+// These callbacks update plain state only. They keep draining through a reload
+// gap; rebinding replaces callbacks, never adds another stdio reader/driver.
+function bindWorker(job: SubagentJob): void {
+	const rpc = job.rpc;
+	const worker = job.worker;
+	if (!rpc || !worker) return;
+	rpc.onRecord = (record) => {
+		applyWorkerRecord(worker, record);
+		if (record.type === "extension_ui_request" && ["select", "confirm", "input", "editor"].includes(record.method)) {
+			// Never auto-approve a headless child's permission/auth question.
+			// Decline it and surface the request; workers should message parent.
+			applyWorkerRecord(worker, { type: "entry_appended", entry: {
+				customType: WORKER_MESSAGE_ENTRY, data: { text: `Child UI request declined (${record.method}): ${record.title ?? record.message ?? "question"}. Use message to ask the parent instead.` },
+			} });
+			void rpc.writeRecord({ type: "extension_ui_response", id: record.id, cancelled: true }).catch(() => {});
+		}
+		ensurePoller();
+	};
+	rpc.onExit = () => { ensurePoller(); };
+}
+
+async function messageWorker(id: string, text: string, from: "parent" | "human"): Promise<void> {
+	validateWorkerMessage(text);
+	const job = registry().jobs.get(id);
+	if (!job || job.kind !== "subagent" || !job.rpc || !isLive(job) || job.stopping || job.rpc.exited) {
+		throw new Error(`No addressable worker ${id} in this session.`);
+	}
+	if (job.worker?.fatal) throw new Error(`${id} has a fatal transport error; stop it and start another worker.`);
+	const packet = Buffer.from(JSON.stringify({ from, text })).toString("base64");
+	await job.rpc.request({ type: "prompt", message: `/${WORKER_INBOX_COMMAND} ${packet}`, streamingBehavior: "steer" });
 }
 
 // Bounded reads only: a log can grow without limit.
@@ -538,7 +556,9 @@ function refreshStatus(): void {
 		ui.setStatus(STATUS_KEY, undefined);
 		return;
 	}
-	const parts = live.map((j) => `${j.id} ${timerField(Date.now() - j.startedAt, jobTotalMs(j))}`);
+	const parts = live.map((j) => j.kind === "subagent" && j.worker
+		? `${j.id} ${j.stopping ? "stopping" : j.worker.phase}${j.worker.phase === "working" ? ` ${fmtElapsedMs(Date.now() - j.startedAt)}` : ""}`
+		: `${j.id} ${timerField(Date.now() - j.startedAt, jobTotalMs(j))}`);
 	ui.setStatus(STATUS_KEY, ui.theme.fg("dim", parts.join(", ")));
 }
 
@@ -589,6 +609,15 @@ function completionText(job: BgJob): string {
 }
 
 function subagentCompletionText(job: SubagentJob): string {
+	if (job.rpc) {
+		const diagnostics = errTail(job);
+		return [
+			`Worker ${job.id} process ended (${job.exitCode !== undefined ? `exit code ${job.exitCode}` : job.rpc.signal ? `signal ${job.rpc.signal}` : "exit status unknown"}); its conversation is no longer addressable.`,
+			job.worker?.error ?? "",
+			diagnostics.text ? `Diagnostics${diagnostics.cut !== "none" ? " (tail)" : ""}:\n${diagnostics.text}` : "",
+			`Full transcript: ${job.logPath}\nFull diagnostics: ${job.errPath}`,
+		].filter(Boolean).join("\n");
+	}
 	const seconds = Math.round(((job.endedAt ?? Date.now()) - job.startedAt) / 100) / 10;
 	const lines = [
 		`Subagent ${job.id} ${outcome(job)}, ran ${seconds}s.`,
@@ -614,6 +643,27 @@ function subagentCompletionText(job: SubagentJob): string {
 }
 
 function deliver(job: BgJob): void {
+	// Pi exposes a live signal during an agent run, but not manual compaction
+	// or other busy pre/post-run boundaries. Keep mail queued until it can be
+	// steered safely or wake a genuinely idle session, rather than start a run
+	// over an in-progress manual compaction.
+	try {
+		if (deliveryContext?.isIdle && !deliveryContext.isIdle() && !deliveryContext.signal) return;
+	} catch { return; } // A stale reload context must never claim delivery.
+	if (pi && job.kind === "subagent" && job.worker && !job.stopping && job.stopReason !== "stopped") {
+		while (job.worker.notices.length > 0) {
+			const notice = job.worker.notices[0];
+			try {
+				pi.sendMessage({
+					customType: notice.kind === "message" ? "subagent-message" : "subagent-reply",
+					content: `${notice.kind === "message" ? "Message from" : "Turn result from"} worker ${job.id} (turn ${notice.turn}; responding to ${notice.source ?? "parent"}):\n${notice.text}\nFull transcript: ${job.logPath}`,
+					display: true,
+					details: { id: job.id, turn: notice.turn, kind: notice.kind, logPath: job.logPath },
+				}, { deliverAs: "steer", triggerTurn: true });
+				job.worker.notices.shift();
+			} catch { break; }
+		}
+	}
 	if (!pi || job.notified || job.state === "running" || job.state === "stopping") return;
 	job.notified = true;
 	try {
@@ -649,6 +699,14 @@ function deliver(job: BgJob): void {
 const killsInFlight = new Map<string, Promise<string>>();
 
 function settleFromMarker(job: BgJob): string | undefined {
+	if (job.kind === "subagent" && job.rpc) {
+		if (!job.rpc.exited) return undefined;
+		job.exitCode = job.rpc.exitCode ?? undefined;
+		job.state = job.exitCode === undefined ? "unknown" : "exited";
+		job.endedAt = Date.now();
+		job.groupGone = !probeAlive(job.pid, true);
+		return `worker process ended (${job.exitCode !== undefined ? `exit code ${job.exitCode}` : job.rpc.signal ? `signal ${job.rpc.signal}` : "exit status unknown"})`;
+	}
 	const marker = readMarker(job);
 	if (marker === undefined) return undefined;
 	job.state = "exited";
@@ -673,7 +731,11 @@ async function stopJob(job: BgJob, reason: "stopped" | "timeout"): Promise<strin
 		// Set before the kill so an explicitly stopped command can never
 		// deliver afterwards; the stop result itself carries the outcome. A
 		// deadline stop keeps delivering - with its cause preserved.
-		if (reason === "stopped") job.notified = true;
+		if (reason === "stopped") {
+			job.notified = true;
+			if (job.kind === "subagent" && job.worker) job.worker.notices.length = 0;
+		}
+		if (job.kind === "subagent") job.rpc?.closeInput();
 		const settled = settleFromMarker(job);
 		if (settled !== undefined) return settled;
 		if (job.groupGone) {
@@ -751,6 +813,14 @@ function pollTick(): void {
 	const reg = registry();
 	for (const job of reg.jobs.values()) {
 		if (job.state !== "running" || job.stopping) continue;
+		if (job.kind === "subagent" && job.rpc) {
+			if (job.rpc.exited) settleFromMarker(job);
+			else if (job.worker?.fatal) {
+				deliver(job);
+				void stopJob(job, "stopped");
+			}
+			continue;
+		}
 		if (job.kind === "bash" && job.deadlineAt !== undefined && !job.stopFailed && Date.now() >= job.deadlineAt) {
 			void stopJob(job, "timeout");
 			continue;
@@ -779,6 +849,7 @@ function pollTick(): void {
 // copy's stale timer and reconnect delivery to the live handle.
 function attach(handle: ExtensionAPI): void {
 	pi = handle;
+	for (const job of registry().jobs.values()) if (job.kind === "subagent") bindWorker(job);
 	stopPoller();
 	ensurePoller();
 }
@@ -787,7 +858,7 @@ const BACKGROUND_CONTRACT =
 	"Set background:true to run a command detached and continue other work: the call returns at once with a job id and the log path, and when the command finishes its result is delivered to you automatically as its own message - it arrives between your tool calls while you keep working, or wakes an idle session; do not poll or sleep-wait. The log path is for progress while the job runs. timeout, if set, limits total runtime including time in the background. Stop a running background job with stop. When nothing useful remains to do, call wait alone to end your turn.";
 
 const SUBAGENT_CONTRACT =
-	"Launch a subagent: a fresh Pi session in this working directory that carries out a task independently. The child starts from the task and ordinary project instructions - never this conversation - with ordinary tools but no subagent tool of its own (no recursive agents). Start is asynchronous: the call returns at once with a job id (sa-N). When it finishes, the final response is delivered here automatically as its own message - between your tool calls while you keep working, or waking an idle session; stop terminates a running child. When nothing useful remains to do, call wait alone to end your turn. The child model is user-configured, not chosen per call.";
+	"Launch an addressable worker: a fresh Pi conversation in this working directory, starting from the task and ordinary project instructions - never this conversation - with ordinary tools but no subagent tool of its own (no recursive agents). Returns a stable sa-N id. Replies and messages arrive here automatically, between tool calls or waking you while idle. After a turn the worker becomes idle and retains its conversation: use message with its id to continue or answer a question, and stop to terminate it. Workers live only within this parent session, including /reload, never across parent exit or replacement. Call wait alone when nothing useful remains; never poll. The child model is user-configured, not chosen per call.";
 
 export default function (handle: ExtensionAPI) {
 	// Bound at factory time, not only at session_start: a completion may land
@@ -893,10 +964,10 @@ export default function (handle: ExtensionAPI) {
 			}
 			const delivered: string[] = [];
 			for (const job of registry().jobs.values()) {
-				if (!isLive(job) && !job.notified) {
-					deliver(job);
-					if (job.notified) delivered.push(job.id);
-				}
+				const pending = !isLive(job) && !job.notified;
+				const notices = job.kind === "subagent" ? job.worker?.notices.length ?? 0 : 0;
+				deliver(job);
+				if ((pending && job.notified) || (job.kind === "subagent" && notices > (job.worker?.notices.length ?? 0))) delivered.push(job.id);
 			}
 			const live = liveJobs();
 			const parts: string[] = [];
@@ -913,6 +984,42 @@ export default function (handle: ExtensionAPI) {
 				details: { delivered, running: live.map((j) => j.id) },
 				terminate: true,
 			};
+		},
+	});
+	const isChild = process.env[CHILD_ENV] === "1";
+	handle.registerTool({
+		name: "message",
+		label: isChild ? "Message parent" : "Message a worker",
+		description: isChild
+			? "Send a question, progress report, or blocker to your parent before your task finishes. Use id: parent. The parent can answer in this same conversation. Do not poll for a reply; call wait alone if you have nothing else to do."
+			: "Send a follow-up, answer, or instruction to an existing worker by its sa-N id. A busy worker reads it at a supported boundary; an idle worker starts another turn in the same conversation. Its replies arrive automatically. This submits a message, not proof the worker has read it.",
+		parameters: Type.Object({
+			id: Type.String({ description: isChild ? "parent" : "Worker id returned by subagent, e.g. sa-1" }),
+			message: Type.String({ description: "Message text (up to 16 KiB); use a file path for longer details" }),
+		}, { additionalProperties: false }),
+		async execute(_toolCallId, params) {
+			const text = validateWorkerMessage(params.message);
+			if (isChild) {
+				if (params.id !== "parent") throw new Error("Workers can message only id: parent; sibling messaging is not supported.");
+				handle.appendEntry(WORKER_MESSAGE_ENTRY, { text });
+			} else await messageWorker(params.id, text, "parent");
+			return { content: [{ type: "text", text: `Message submitted to ${params.id}. Replies arrive automatically.` }], details: { id: params.id } };
+		},
+	});
+	if (isChild) handle.registerCommand(WORKER_INBOX_COMMAND, {
+		description: "Internal RPC worker inbox",
+		handler: async (encoded, ctx) => {
+			if (ctx.mode !== "rpc") throw new Error("The worker inbox is RPC-only.");
+			const packet = JSON.parse(Buffer.from(encoded, "base64").toString("utf8"));
+			if (packet.from !== "parent" && packet.from !== "human") throw new Error("Invalid worker message sender.");
+			const text = validateWorkerMessage(packet.text);
+			if (ctx.isIdle && !ctx.isIdle() && !ctx.signal) {
+				throw new Error("Worker is preparing or compacting; message was not submitted. Resubmit after that operation settles.");
+			}
+			handle.sendMessage({
+				customType: "worker-inbox", content: `Message from ${packet.from}:\n${text}`, display: true,
+				details: { from: packet.from },
+			}, { deliverAs: "steer", triggerTurn: true });
 		},
 	});
 	// Registered only outside subagent children: the child marker set by
@@ -946,8 +1053,8 @@ export default function (handle: ExtensionAPI) {
 								`Subagent ${job.id} started (pid ${job.pid}).`,
 								`Task: ${oneLine(task)}`,
 								`Model: ${model}`,
-								`When it finishes, the final response is delivered here automatically - it arrives between your tool calls. Continue other work instead of polling; when nothing useful remains to do, call wait alone to end your turn.`,
-								`No intermediate progress: ${job.errPath} collects diagnostics if it fails; the result lands in ${job.logPath} at completion.`,
+								"Replies and messages arrive automatically. After a turn this worker becomes idle; use message with this id to continue. Call wait alone when you have nothing useful to do.",
+								`Open its live conversation with /bg ${job.id}. Full event transcript: ${job.logPath}; diagnostics: ${job.errPath}.`,
 							].join("\n"),
 						},
 					],
@@ -957,9 +1064,33 @@ export default function (handle: ExtensionAPI) {
 		});
 	}
 	handle.registerCommand("bg", {
-		description: "List background jobs this session started (commands and subagents), with live timers (snapshot card in the transcript; no model context)",
-		handler: async () => {
-			// The card is a record of the check: custom entries never enter LLM
+		description: "Open background jobs and worker conversations; /bg sa-N opens that worker directly (human-only, no model context)",
+		handler: async (args, ctx) => {
+			if (ctx?.mode === "tui") {
+				const { openWorkerInspector } = await import("./lib/worker-inspector.ts");
+				await openWorkerInspector(ctx, {
+					initialId: args.trim() || undefined,
+					rows: () => [...registry().jobs.values()].filter((job) => isLive(job) || job.kind === "subagent").map((job) => ({
+						id: job.id, kind: job.kind,
+						state: job.stopping ? "stopping" : !isLive(job) && job.stopReason === "stopped" ? "stopped" : job.kind === "subagent" && isLive(job) ? job.worker?.phase ?? job.state : job.state,
+						task: job.kind === "subagent" ? job.task : job.command,
+						model: job.kind === "subagent" ? job.model : undefined,
+						activity: job.kind === "subagent" ? isLive(job) ? job.worker?.activity : "conversation closed" : undefined,
+						startedAt: job.startedAt, endedAt: job.endedAt, logPath: job.logPath,
+						transcript: job.kind === "subagent" && job.worker
+							? job.worker.transcript + (job.worker.partial ? `\nAssistant (streaming):\n${job.worker.partial}` : "")
+							: outputTail(job).text,
+					})),
+					send: (id, text) => messageWorker(id, text, "human"),
+					stop: async (id) => {
+						const job = registry().jobs.get(id);
+						if (!job || !isLive(job)) throw new Error(`${id} is no longer running.`);
+						ctx.ui.notify(`${id} ${await stopJob(job, "stopped")}.`, "info");
+					},
+				});
+				return;
+			}
+			// The non-TUI card is a record of the check: custom entries never enter LLM
 			// context, and the snapshot stays honest in scrollback and on disk.
 			pi?.appendEntry("bash-bg-status", {
 				at: new Date().toISOString(),
@@ -999,6 +1130,7 @@ export default function (handle: ExtensionAPI) {
 		// jobs; a reload takes them over. Awaited cleanup here is
 		// belt-and-braces for a shutdown that did not run.
 		// Headless modes (and the stub suite) carry no ui; the footer needs one.
+		deliveryContext = ctx;
 		if (ctx?.ui && ctx.hasUI !== false) ui = ctx.ui as unknown as UiLike;
 		if (event.reason !== "reload" && event.reason !== "startup") {
 			await stopAllJobs();
@@ -1013,9 +1145,12 @@ export default function (handle: ExtensionAPI) {
 			// Jobs keep running; this instance's handle must never deliver again.
 			// ui stays: this copy's pollTick keeps the footer honest until the
 			// replacement instance attaches.
+			deliveryContext = undefined;
 			pi = undefined;
 			return;
 		}
+		pi = undefined;
+		deliveryContext = undefined;
 		await stopAllJobs();
 		registry().jobs.clear();
 		stopPoller();

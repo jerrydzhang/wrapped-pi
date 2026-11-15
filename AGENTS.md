@@ -55,16 +55,18 @@ are taken by sibling repos).
 
 Node tests with stubs prove logic only. Changes touching rendering, tool
 registration, or session behavior must also be verified in a live pi
-session driven through the `orca-terminals` skill — launch
-`pi --no-session -e ./extensions/<file>.ts`, drive it, read `--screen`,
-and report what was observed. Stub tests green is not done for UI-facing
+session driven through the `herdr-core` skill — launch
+`pi --no-session -e ./extensions/<file>.ts`, drive it, inspect the screen
+with `herdr-core read <terminal> --lines 0`, and report what was observed.
+Use Herdr Core, not Orca, for terminal control. Stub tests green is not done for UI-facing
 changes.
 
 ## Working under saccade
 
-Retrieve before reasoning; park conclusions on the task thread as they
-form, not batched at delivery; offer with evidence — diff summary, tests
-run with counts, live-session observations. Never accept your own offer:
-acceptance is the user's. Worktree lifecycle belongs to `sac start`,
-`sac open`, and `sac clean` — never `orca worktree create` or
-`worktree rm` for task work.
+Retrieve the current task board and its history before reasoning; revise
+conclusions on the board as they form, not batched at delivery. Offer the
+board with evidence — diff summary, tests run with counts, live-session
+observations. Never accept your own offer: acceptance is the user's.
+Workspace/session lifecycle belongs to the current `sac workspace` and
+`sac launch` interfaces; Herdr Core handles terminal mechanics, not tracker
+ownership. Follow the installed Saccade skill for current commands.
