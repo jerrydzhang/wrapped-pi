@@ -601,6 +601,58 @@
         "type": "github"
       }
     },
+    "claude-code-aarch64-linux": {
+      "flake": false,
+      "locked": {
+        "lastModified": 499162500,
+        "narHash": "sha256-srYR4KN735pj9fce52uVlWlCTQS8IXuKDUxVj0+ziss=",
+        "type": "tarball",
+        "url": "https://registry.npmjs.org/@anthropic-ai/claude-code-linux-arm64/-/claude-code-linux-arm64-2.1.318.tgz"
+      },
+      "original": {
+        "type": "tarball",
+        "url": "https://registry.npmjs.org/@anthropic-ai/claude-code-linux-arm64/-/claude-code-linux-arm64-2.1.318.tgz"
+      }
+    },
+    "claude-code-aarch64-linux_2": {
+      "flake": false,
+      "locked": {
+        "lastModified": 499162500,
+        "narHash": "sha256-srYR4KN735pj9fce52uVlWlCTQS8IXuKDUxVj0+ziss=",
+        "type": "tarball",
+        "url": "https://registry.npmjs.org/@anthropic-ai/claude-code-linux-arm64/-/claude-code-linux-arm64-2.1.318.tgz"
+      },
+      "original": {
+        "type": "tarball",
+        "url": "https://registry.npmjs.org/@anthropic-ai/claude-code-linux-arm64/-/claude-code-linux-arm64-2.1.318.tgz"
+      }
+    },
+    "claude-code-x86_64-linux": {
+      "flake": false,
+      "locked": {
+        "lastModified": 499162500,
+        "narHash": "sha256-RUTn2MnXO6jGO5OVuQISn1XDAMTDBncfZ3DM3pHrtYk=",
+        "type": "tarball",
+        "url": "https://registry.npmjs.org/@anthropic-ai/claude-code-linux-x64/-/claude-code-linux-x64-2.1.318.tgz"
+      },
+      "original": {
+        "type": "tarball",
+        "url": "https://registry.npmjs.org/@anthropic-ai/claude-code-linux-x64/-/claude-code-linux-x64-2.1.318.tgz"
+      }
+    },
+    "claude-code-x86_64-linux_2": {
+      "flake": false,
+      "locked": {
+        "lastModified": 499162500,
+        "narHash": "sha256-RUTn2MnXO6jGO5OVuQISn1XDAMTDBncfZ3DM3pHrtYk=",
+        "type": "tarball",
+        "url": "https://registry.npmjs.org/@anthropic-ai/claude-code-linux-x64/-/claude-code-linux-x64-2.1.318.tgz"
+      },
+      "original": {
+        "type": "tarball",
+        "url": "https://registry.npmjs.org/@anthropic-ai/claude-code-linux-x64/-/claude-code-linux-x64-2.1.318.tgz"
+      }
+    },
     "crate2nix": {
       "flake": false,
       "locked": {
@@ -1882,6 +1934,110 @@
         "type": "github"
       }
     },
+    "herdr-app-aarch64-linux": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1793483419,
+        "narHash": "sha256-xNmkPXXa2Tustkg2OP+eIuSziyqcWsMhbae9H45ku/8=",
+        "type": "tarball",
+        "url": "https://releases.herdr.dev/app/0.1.11/herdr-app-linux-aarch64.tar.gz"
+      },
+      "original": {
+        "type": "tarball",
+        "url": "https://releases.herdr.dev/app/0.1.11/herdr-app-linux-aarch64.tar.gz"
+      }
+    },
+    "herdr-app-aarch64-linux_2": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1793483419,
+        "narHash": "sha256-xNmkPXXa2Tustkg2OP+eIuSziyqcWsMhbae9H45ku/8=",
+        "type": "tarball",
+        "url": "https://releases.herdr.dev/app/0.1.11/herdr-app-linux-aarch64.tar.gz"
+      },
+      "original": {
+        "type": "tarball",
+        "url": "https://releases.herdr.dev/app/0.1.11/herdr-app-linux-aarch64.tar.gz"
+      }
+    },
+    "herdr-app-x86_64-linux": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1793483418,
+        "narHash": "sha256-Kx0QKYramjgM9SxAAJats6o1+O14nGaf+5vnBxEp9UY=",
+        "type": "tarball",
+        "url": "https://releases.herdr.dev/app/0.1.11/herdr-app-linux-x86_64.tar.gz"
+      },
+      "original": {
+        "type": "tarball",
+        "url": "https://releases.herdr.dev/app/0.1.11/herdr-app-linux-x86_64.tar.gz"
+      }
+    },
+    "herdr-app-x86_64-linux_2": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1793483418,
+        "narHash": "sha256-Kx0QKYramjgM9SxAAJats6o1+O14nGaf+5vnBxEp9UY=",
+        "type": "tarball",
+        "url": "https://releases.herdr.dev/app/0.1.11/herdr-app-linux-x86_64.tar.gz"
+      },
+      "original": {
+        "type": "tarball",
+        "url": "https://releases.herdr.dev/app/0.1.11/herdr-app-linux-x86_64.tar.gz"
+      }
+    },
+    "herdr-core-aarch64-linux": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1793624171,
+        "narHash": "sha256-URBw4Oo794eS6RRWv4LthkTqzzDcbOPFStLpfohi28g=",
+        "type": "tarball",
+        "url": "https://releases.herdr.dev/core/0.1.17/herdr-core-linux-aarch64.tar.gz"
+      },
+      "original": {
+        "type": "tarball",
+        "url": "https://releases.herdr.dev/core/0.1.17/herdr-core-linux-aarch64.tar.gz"
+      }
+    },
+    "herdr-core-aarch64-linux_2": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1793624171,
+        "narHash": "sha256-URBw4Oo794eS6RRWv4LthkTqzzDcbOPFStLpfohi28g=",
+        "type": "tarball",
+        "url": "https://releases.herdr.dev/core/0.1.17/herdr-core-linux-aarch64.tar.gz"
+      },
+      "original": {
+        "type": "tarball",
+        "url": "https://releases.herdr.dev/core/0.1.17/herdr-core-linux-aarch64.tar.gz"
+      }
+    },
+    "herdr-core-x86_64-linux": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1793624075,
+        "narHash": "sha256-jdgIcDV9Y9RhvofLHpDLYtB/iCpnJ9pF0nlZ0LlqLrM=",
+        "type": "tarball",
+        "url": "https://releases.herdr.dev/core/0.1.17/herdr-core-linux-x86_64.tar.gz"
+      },
+      "original": {
+        "type": "tarball",
+        "url": "https://releases.herdr.dev/core/0.1.17/herdr-core-linux-x86_64.tar.gz"
+      }
+    },
+    "herdr-core-x86_64-linux_2": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1793624075,
+        "narHash": "sha256-jdgIcDV9Y9RhvofLHpDLYtB/iCpnJ9pF0nlZ0LlqLrM=",
+        "type": "tarball",
+        "url": "https://releases.herdr.dev/core/0.1.17/herdr-core-linux-x86_64.tar.gz"
+      },
+      "original": {
+        "type": "tarball",
+        "url": "https://releases.herdr.dev/core/0.1.17/herdr-core-linux-x86_64.tar.gz"
+      }
+    },
     "llm-agents": {
       "inputs": {
         "bun2nix": "bun2nix",
@@ -2772,6 +2928,38 @@
         "owner": "cachix",
         "ref": "rolling",
         "repo": "devenv-nixpkgs",
+        "type": "github"
+      }
+    },
+    "nixpkgs-client": {
+      "locked": {
+        "lastModified": 1790822859,
+        "narHash": "sha256-69xHQhAeMAD2wDXO7T2pcOZIF9Sga2W+JkmY2a11Ops=",
+        "owner": "NixOS",
+        "repo": "nixpkgs",
+        "rev": "c59305bab2065cfecc4944690d9eedbb56f3a9fa",
+        "type": "github"
+      },
+      "original": {
+        "owner": "NixOS",
+        "repo": "nixpkgs",
+        "rev": "c59305bab2065cfecc4944690d9eedbb56f3a9fa",
+        "type": "github"
+      }
+    },
+    "nixpkgs-client_2": {
+      "locked": {
+        "lastModified": 1790822859,
+        "narHash": "sha256-69xHQhAeMAD2wDXO7T2pcOZIF9Sga2W+JkmY2a11Ops=",
+        "owner": "NixOS",
+        "repo": "nixpkgs",
+        "rev": "c59305bab2065cfecc4944690d9eedbb56f3a9fa",
+        "type": "github"
+      },
+      "original": {
+        "owner": "NixOS",
+        "repo": "nixpkgs",
+        "rev": "c59305bab2065cfecc4944690d9eedbb56f3a9fa",
         "type": "github"
       }
     },
@@ -3900,18 +4088,25 @@
     },
     "saccade": {
       "inputs": {
+        "claude-code-aarch64-linux": "claude-code-aarch64-linux",
+        "claude-code-x86_64-linux": "claude-code-x86_64-linux",
         "devenv": "devenv_2",
+        "herdr-app-aarch64-linux": "herdr-app-aarch64-linux",
+        "herdr-app-x86_64-linux": "herdr-app-x86_64-linux",
+        "herdr-core-aarch64-linux": "herdr-core-aarch64-linux",
+        "herdr-core-x86_64-linux": "herdr-core-x86_64-linux",
         "nixpkgs": "nixpkgs_5",
+        "nixpkgs-client": "nixpkgs-client",
         "rust-overlay": "rust-overlay_3",
         "saccade": "saccade_2",
         "wrapped-pi": "wrapped-pi_3"
       },
       "locked": {
-        "lastModified": 1792937310,
-        "narHash": "sha256-w/58lFpsBD61RLaM4JA9aS238NwhmyIG5tN/d0ujgXY=",
+        "lastModified": 1794756712,
+        "narHash": "sha256-foQX+Rs3q4WH0IyR/7ObCAVna6ATDbbmAzAo+zAHm+w=",
         "owner": "jerrydzhang",
         "repo": "saccade",
-        "rev": "6d7e0ef629c03cddfc65722b325634b83a825055",
+        "rev": "fc67f8dc0deebbc109d304a5fd6abad857a7a05e",
         "type": "github"
       },
       "original": {
@@ -3922,8 +4117,15 @@
     },
     "saccade_2": {
       "inputs": {
+        "claude-code-aarch64-linux": "claude-code-aarch64-linux_2",
+        "claude-code-x86_64-linux": "claude-code-x86_64-linux_2",
         "devenv": "devenv_3",
+        "herdr-app-aarch64-linux": "herdr-app-aarch64-linux_2",
+        "herdr-app-x86_64-linux": "herdr-app-x86_64-linux_2",
+        "herdr-core-aarch64-linux": "herdr-core-aarch64-linux_2",
+        "herdr-core-x86_64-linux": "herdr-core-x86_64-linux_2",
         "nixpkgs": "nixpkgs_8",
+        "nixpkgs-client": "nixpkgs-client_2",
         "rust-overlay": "rust-overlay_5",
         "saccade": [
           "saccade",
@@ -3932,11 +4134,11 @@
         "wrapped-pi": "wrapped-pi"
       },
       "locked": {
-        "lastModified": 1792905566,
-        "narHash": "sha256-/I2bgctgzDY6pjSksif+I8IaNgu07v1aE+UOqhYRbt8=",
+        "lastModified": 1794705856,
+        "narHash": "sha256-vBaVj1SPZxGezlHl79H6TXcwi0BIUh07ffqvqgbsFvM=",
         "owner": "jerrydzhang",
         "repo": "saccade",
-        "rev": "dac9e7fbb0ba8c1b7fff8594e584c2242dabcb41",
+        "rev": "447cd4cb453a2b8d55be10bd01c34c14e5531739",
         "type": "github"
       },
       "original": {
@@ -4436,11 +4638,11 @@
         "saccade": "saccade_3"
       },
       "locked": {
-        "lastModified": 1791990113,
-        "narHash": "sha256-dNxO4HKGtT9kkiRZQnTCy66mSQIUXVGAewR4r/NjHho=",
+        "lastModified": 1792692987,
+        "narHash": "sha256-CuJGq3Twm5YPbnV0f4JZ1o+lVFpf0eWx/hNOm1AULHA=",
         "owner": "jerrydzhang",
         "repo": "wrapped-pi",
-        "rev": "ec7c46e6bce65f3f00f827fda05ed09e636c15e2",
+        "rev": "4a77089a44cfbf4efa60c9085f7327dd1811b120",
         "type": "github"
       },
       "original": {
@@ -4476,11 +4678,11 @@
         "saccade": "saccade_5"
       },
       "locked": {
-        "lastModified": 1791990113,
-        "narHash": "sha256-dNxO4HKGtT9kkiRZQnTCy66mSQIUXVGAewR4r/NjHho=",
+        "lastModified": 1792692987,
+        "narHash": "sha256-CuJGq3Twm5YPbnV0f4JZ1o+lVFpf0eWx/hNOm1AULHA=",
         "owner": "jerrydzhang",
         "repo": "wrapped-pi",
-        "rev": "ec7c46e6bce65f3f00f827fda05ed09e636c15e2",
+        "rev": "4a77089a44cfbf4efa60c9085f7327dd1811b120",
         "type": "github"
       },
       "original": {
