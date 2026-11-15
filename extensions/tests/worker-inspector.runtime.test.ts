@@ -87,9 +87,12 @@ test("real TUI: inspector renders narrow/wide text, refreshes, composes, stops, 
 		h.setRows([{ id: "sa-1", kind: "subagent", state: "stopped", task: "worker", startedAt: 1, endedAt: 2, transcript: "closed", logPath: "/tmp/events" }]);
 		h.tick();
 		assert.doesNotMatch(h.component.render(80).join("\n"), /m message|x stop/);
+		assert.match(h.component.render(80).join("\n"), /x remove/);
+		h.setRows([]); // Successful explicit stop removes the registry entry.
 		h.component.handleInput("m"); h.component.handleInput("x"); await next();
 		assert.equal(h.sent.length, 1, "closed conversations cannot be messaged");
-		assert.equal(h.stopped.length, 1, "closed conversations cannot be stopped twice");
+		assert.equal(h.stopped.length, 2, "explicit stop can discard a previously ended worker");
+		assert.doesNotMatch(h.component.render(80).join("\n"), /sa-1|closed|\/tmp\/events/, "a removed selection returns to the list without retaining its transcript");
 		h.component.handleInput("q"); await h.opened;
 		assert.ok(h.cleared() >= 1, "closing clears the refresh timer");
 	} finally { await h.close(); }

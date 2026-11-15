@@ -878,10 +878,72 @@ test(
 		const stopped = await app.stop().execute("s1", { id: "sa-1" });
 		assert.match(stopped.content[0].text, /sa-1 worker process ended \(exit code 0\)/, "the fake Pi exits cleanly when shut down");
 		assert.equal(job.state, "exited");
+		assert.equal(jobs().length, 0, "explicit stop forgets the worker, not just its running process");
+		assert.equal(WorkerRpc.get(pid), undefined);
 		await waitFor(() => !groupAlive(pid));
 		await new Promise((r) => setTimeout(r, 800));
 		assert.equal(app.sent.length, 0, "a stopped worker sends no completion");
 		await assert.rejects(message(app, "sa-1", "RECALL"), /No addressable worker sa-1 in this session\./);
+	}),
+);
+
+test(
+	"natural completion retains workers; explicit stop forgets only its target, including across reload",
+	withFakeCli(async () => {
+		const app = await fresh();
+		const first = await launchWorker(app, "SAY:first");
+		const second = await launchWorker(app, "SAY:second");
+		await waitFor(() => app.sent.length === 2);
+		assert.equal(jobs().length, 2, "natural completion leaves both workers available");
+		assert.ok(jobs().every((job) => job.worker.phase === "idle"));
+		const stopped = await app.stop().execute("s1", { id: first.job.id });
+		assert.match(stopped.content[0].text, /worker removed from this session/);
+		assert.deepEqual(jobs().map((job) => job.id), [second.job.id]);
+		assert.equal(groupAlive(first.job.pid), false);
+		await assert.rejects(message(app, first.job.id, "SAY:no"), /No addressable worker/);
+		await app.emit("session_shutdown", { reason: "reload" });
+		const reloaded = fakePi();
+		bashBackground(reloaded.handle);
+		await reloaded.emit("session_start", { reason: "reload" });
+		assert.deepEqual(jobs().map((job) => job.id), [second.job.id], "reload cannot restore a stopped worker");
+		await message(reloaded, second.job.id, "SAY:still-here");
+		await waitFor(() => reloaded.sent.length === 1);
+		assert.equal(noticeText(reloaded.sent[0]), "still-here");
+		await reloaded.stop().execute("s2", { id: second.job.id });
+		assert.equal(jobs().length, 0);
+		await reloaded.commands.get("bg").handler("", testCtx("/tmp"));
+		assert.deepEqual(reloaded.entries.at(-1).data.jobs, []);
+		const again = await reloaded.stop().execute("s3", { id: first.job.id });
+		assert.equal(again.details.found, false);
+	}),
+);
+
+test(
+	"a denied stop keeps the worker visible until termination succeeds",
+	withFakeCli(async () => {
+		const app = await fresh();
+		const { job } = await launchWorker(app, "HANG");
+		const kill = process.kill;
+		const closeInput = job.rpc.closeInput;
+		try {
+			// Keep the fixture alive to exercise a real unresolved stop, without
+			// requiring another user's process or actually changing permissions.
+			job.rpc.closeInput = () => {};
+			process.kill = function (pid, signal) {
+				if (pid === -job.pid && signal !== 0) throw Object.assign(new Error("denied"), { code: "EPERM" });
+				return kill.call(process, pid, signal);
+			};
+			const stopped = await app.stop().execute("s1", { id: job.id });
+			assert.match(stopped.content[0].text, /could not be stopped/);
+			assert.equal(job.stopFailed, "denied");
+			assert.equal(jobs()[0], job, "a possibly live worker must never be silently forgotten");
+			assert.equal(groupAlive(job.pid), true);
+		} finally {
+			process.kill = kill;
+			job.rpc.closeInput = closeInput;
+		}
+		await app.stop().execute("s2", { id: job.id });
+		assert.equal(jobs().length, 0, "a subsequent successful stop removes the worker");
 	}),
 );
 
@@ -919,14 +981,15 @@ test(
 );
 
 test(
-	"stopping an already-ended worker reports status without side effects",
+	"explicit stop also forgets an already-ended worker",
 	withFakeCli(async () => {
 		const app = await fresh();
 		await launchWorker(app, "FAIL:already-gone");
 		await waitFor(() => app.sent.length === 1);
 		const stopped = await app.stop().execute("s1", { id: "sa-1" });
-		assert.match(stopped.content[0].text, /sa-1 already finished: failed: its Pi process exited with code 1, ran \d+(\.\d+)?s\./);
-		assert.deepEqual(stopped.details, { id: "sa-1", state: "exited" });
+		assert.match(stopped.content[0].text, /sa-1 worker process ended \(exit code 1\); worker removed from this session\./);
+		assert.equal(stopped.details.state, "exited");
+		assert.equal(jobs().length, 0);
 	}),
 );
 

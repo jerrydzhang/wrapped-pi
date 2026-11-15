@@ -54,8 +54,10 @@ A worker is one long-lived Pi RPC subprocess with an in-memory conversation.
 After completing a turn it becomes **idle**, not destroyed. Replies arrive
 automatically; use `message` with the same id for another turn. A failed model
 turn is reported without pretending its task succeeded, and can receive a
-follow-up if its process remains alive. Process termination closes the address.
-There is no per-call model override or task timeout.
+follow-up if its process remains alive. Explicit `stop` terminates and forgets
+it: the worker cannot be messaged or resumed and disappears from `/bg`.
+There is no pause-without-termination option, per-call model override, or task
+timeout.
 
 ### `message { id, message }`
 
@@ -90,6 +92,14 @@ kills them. Surviving or unsignalable groups are reported honestly, not falsely
 claimed stopped. An explicit stop suppresses further automatic replies;
 its result is the outcome.
 
+A successfully stopped worker is removed from the session registry, `/bg`,
+and parent memory rather than retained as a closed conversation. Stopping an
+already-ended worker also discards its entry. If the process group may still
+be alive, the entry remains visible instead of hiding an unresolved stop.
+Private temporary diagnostic/event logs are not deleted; they are not saved,
+resumable Pi sessions. Natural turn completion, unlike stop, keeps the worker
+idle and reusable.
+
 ## Human observability
 
 The footer shows running bash jobs with elapsed time (and total when timed),
@@ -104,7 +114,9 @@ conversation directly. Bash jobs appear alongside workers.
   model, elapsed time, and the full event-log path.
 - Arrows/PageUp/PageDown scroll; Home goes to the top, End follows the live
   tail again. `m` composes a direct human message to a worker; `x` confirms
-  termination. Escape returns to the list; `q` closes.
+  termination and removal of a worker. Removing the selected worker returns
+  to the list. Previously ended workers offer `x` to remove their entry.
+  Escape returns to the list; `q` closes.
 - Inspection and direct human messages do not add transcript dumps to the
   parent's model context. The worker can still reply/report back normally.
 

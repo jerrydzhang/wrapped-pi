@@ -453,7 +453,7 @@ class WorkerInspectorComponent implements Component {
 		} else if (this.matchesLetters(data, "m", "M") && row !== undefined && row.kind !== "bash" && isLiveState(row.state) && !this.busy.has(row.id)) {
 			this.compose(row);
 			return;
-		} else if (this.matchesLetters(data, "x", "X") && row !== undefined && isLiveState(row.state) && !this.busy.has(row.id)) {
+		} else if (this.matchesLetters(data, "x", "X") && row !== undefined && (row.kind === "subagent" || isLiveState(row.state)) && !this.busy.has(row.id)) {
 			this.requestStop(row);
 			return;
 		} else if (kb.matches(data, "tui.select.cancel")) {
@@ -553,7 +553,9 @@ class WorkerInspectorComponent implements Component {
 			try {
 				confirmed = await this.ctx.ui.confirm(
 					`Stop ${sanitizeWorkerText(row.id)}?`,
-					`Terminates the ${sanitizeWorkerText(row.kind)} job's whole process group. This cannot be undone.`,
+					row.kind === "subagent"
+						? "Terminates this worker and removes its conversation from this session. This cannot be undone."
+						: "Terminates the bash job's whole process group. This cannot be undone.",
 				);
 			} catch (error) {
 				if (!this.closed) this.ctx.ui.notify(`Could not open the confirm dialog: ${describeError(error)}`, "error");
@@ -765,9 +767,9 @@ class WorkerInspectorComponent implements Component {
 			th.fg("dim", `${pageUp}/${pageDown}`) + th.fg("muted", " page | "),
 			th.fg("dim", "End") + th.fg("muted", " tail | "),
 		];
-		if (isLiveState(row.state)) {
-			if (row.kind !== "bash") parts.push(th.fg("dim", "m") + th.fg("muted", " message | "));
-			parts.push(th.fg("dim", "x") + th.fg("muted", " stop | "));
+		if (isLiveState(row.state) && row.kind !== "bash") parts.push(th.fg("dim", "m") + th.fg("muted", " message | "));
+		if (row.kind === "subagent" || isLiveState(row.state)) {
+			parts.push(th.fg("dim", "x") + th.fg("muted", isLiveState(row.state) ? " stop | " : " remove | "));
 		}
 		parts.push(th.fg("dim", esc) + th.fg("muted", " back | "));
 		parts.push(th.fg("dim", "q") + th.fg("muted", " close"));

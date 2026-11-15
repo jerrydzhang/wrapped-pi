@@ -34,6 +34,8 @@ Workers retain their conversation within the parent session, including
 `/reload`. Use `message` for follow-ups or questions, `/bg` to open live worker
 conversations, and `wait {}` to yield when there is nothing useful to do.
 Human input and incoming results resume the parent without cancelling jobs.
+Natural completion leaves a worker idle and reusable; explicit `stop` terminates
+and removes it from the session and `/bg` (there is no pause state).
 
 If these extensions were previously installed globally, remove those managed
 copies explicitly before adopting the wrapper to avoid duplicate loading.

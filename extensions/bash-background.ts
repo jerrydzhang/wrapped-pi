@@ -704,7 +704,7 @@ function settleFromMarker(job: BgJob): string | undefined {
 		job.exitCode = job.rpc.exitCode ?? undefined;
 		job.state = job.exitCode === undefined ? "unknown" : "exited";
 		job.endedAt = Date.now();
-		job.groupGone = !probeAlive(job.pid, true);
+		job.groupGone ||= !probeAlive(job.pid, true);
 		return `worker process ended (${job.exitCode !== undefined ? `exit code ${job.exitCode}` : job.rpc.signal ? `signal ${job.rpc.signal}` : "exit status unknown"})`;
 	}
 	const marker = readMarker(job);
@@ -788,6 +788,20 @@ async function stopJob(job: BgJob, reason: "stopped" | "timeout"): Promise<strin
 	});
 	killsInFlight.set(job.id, shared);
 	return shared;
+}
+
+// Explicit worker stop means terminate and forget, not pause or archive.
+// Keep unresolved stops visible: never hide a group that may still be alive.
+async function stopExplicitly(job: BgJob): Promise<string> {
+	const how = await stopJob(job, "stopped");
+	if (job.kind === "subagent" && job.groupGone && registry().jobs.get(job.id) === job) {
+		registry().jobs.delete(job.id);
+		refreshStatus();
+		return `${how}; worker removed from this session`;
+	}
+	return job.kind === "subagent" && !job.groupGone
+		? `${how}; worker retained because its process group may still be running`
+		: how;
 }
 
 // Awaited by shutdown hooks so pi can hold exit until escalation settles.
@@ -904,7 +918,7 @@ export default function (handle: ExtensionAPI) {
 		name: "stop",
 		label: "Stop background job",
 		description:
-			"Stop a background job (a bash command started with background:true, or a subagent) that this session started, by its job id (bg-N or sa-N). Terminates the job's whole process group and reports the observed outcome; the stop result is the outcome - no completion message follows for a job you stopped.",
+			"Stop a background job (a bash command started with background:true, or a subagent) that this session started, by its job id (bg-N or sa-N). Terminates the job's whole process group and reports the observed outcome; the stop result is the outcome - no completion message follows for a job you stopped. A successfully stopped worker is removed from the session and /bg, not paused or retained.",
 		parameters: Type.Object({
 			id: Type.String({ description: "Job id returned by a background bash call (bg-N) or a subagent call (sa-N)" }),
 		}),
@@ -916,7 +930,7 @@ export default function (handle: ExtensionAPI) {
 					details: { id: params.id, found: false },
 				};
 			}
-			if (job.state !== "running" && job.state !== "stopping") {
+			if (job.kind !== "subagent" && job.state !== "running" && job.state !== "stopping") {
 				const seconds = Math.round(((job.endedAt ?? Date.now()) - job.startedAt) / 100) / 10;
 				// Status only: pointers ride boundaries (start message, completion),
 				// never pulls.
@@ -930,7 +944,7 @@ export default function (handle: ExtensionAPI) {
 					details: { id: job.id, state: job.state },
 				};
 			}
-			const how = await stopJob(job, "stopped");
+			const how = await stopExplicitly(job);
 			return {
 				content: [{ type: "text", text: `${job.id} ${how}.` }],
 				details: { id: job.id, state: job.state, outcome: how },
@@ -1084,8 +1098,8 @@ export default function (handle: ExtensionAPI) {
 					send: (id, text) => messageWorker(id, text, "human"),
 					stop: async (id) => {
 						const job = registry().jobs.get(id);
-						if (!job || !isLive(job)) throw new Error(`${id} is no longer running.`);
-						ctx.ui.notify(`${id} ${await stopJob(job, "stopped")}.`, "info");
+						if (!job || (job.kind !== "subagent" && !isLive(job))) throw new Error(`${id} is no longer running.`);
+						ctx.ui.notify(`${id} ${await stopExplicitly(job)}.`, "info");
 					},
 				});
 				return;
