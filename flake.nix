@@ -3,7 +3,7 @@
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
-    pi.url = "github:earendil-works/pi";
+    pi.url = "github:earendil-works/pi/v1.5.2";
     saccade.url = "github:jerrydzhang/saccade";
     devenv.url = "github:cachix/devenv";
   };
