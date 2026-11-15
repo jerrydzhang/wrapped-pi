@@ -648,77 +648,6 @@ function deliver(job: BgJob): void {
 
 const killsInFlight = new Map<string, Promise<string>>();
 
-// ---- wait ----
-//
-// Waiters live in module scope, never in the registry: a reload kills the
-// module copy and its pending tool calls together, and a fresh instance must
-// not inherit promises owned by dead ones. Resolution is state-based - every
-// tick satisfies any registered waiter whose condition already holds - so a
-// job settling outside pollTick (a stop path) can never strand a wait.
-
-type WaitEnd = "settled" | "kill" | "timeout" | "abort";
-
-interface JobWaiter {
-	job: BgJob;
-	resolve: (end: WaitEnd) => void;
-}
-
-interface AllWaiter {
-	resolve: (end: WaitEnd) => void;
-}
-
-const jobWaiters = new Set<JobWaiter>();
-const allWaiters = new Set<AllWaiter>();
-
-// Called from pollTick only, between the settle loop and the deliver pass:
-// pure resolution - a wait answers "done yet?" and carries no content, so it
-// claims nothing. The same tick's deliver pass arms the steer for every
-// freshly settled job; the wait's status line returns beside that message.
-function resolveWaiters(): void {
-	for (const waiter of jobWaiters) {
-		if (isLive(waiter.job)) continue;
-		jobWaiters.delete(waiter);
-		waiter.resolve("settled");
-	}
-	if (allWaiters.size === 0 || liveJobs().length > 0) return;
-	for (const waiter of allWaiters) {
-		allWaiters.delete(waiter);
-		waiter.resolve("settled");
-	}
-}
-
-// A settled job's wait return: status only. The completion rides the steer
-// armed alongside this line; pointers ride boundaries (start message,
-// completion), never pulls.
-function statusLine(job: BgJob): string {
-	return `${job.id} ${outcome(job)}.`;
-}
-
-// The still-running line: synchronization status only - never an output
-// tail, and no pointer: the start message carries the standing log path,
-// and pointers ride boundaries, not pulls.
-function stillRunningLine(job: BgJob): string {
-	const elapsed = fmtElapsedMs(Date.now() - job.startedAt);
-	const total = jobTotalMs(job);
-	return `${job.id} still running, ${total !== undefined ? `${elapsed} / ${fmtTotalMs(total)}` : elapsed}.`;
-}
-
-// The all-wait return: one status line per settled job, in start order.
-// Delivery is armed for every settled job (idempotent - an armed or
-// suppressed job no-ops), so the completions arrive alongside this result.
-function composeAllWait(): string {
-	const settled = [...registry().jobs.values()]
-		.filter((job) => !isLive(job))
-		.sort((a, b) => a.startedAt - b.startedAt);
-	if (settled.length === 0) return "No background jobs pending.";
-	for (const job of settled) deliver(job);
-	return settled.map(statusLine).join("\n");
-}
-
-function abortAllText(): string {
-	return ["Wait aborted - jobs untouched, still running:", ...liveJobs().map(stillRunningLine)].join("\n");
-}
-
 function settleFromMarker(job: BgJob): string | undefined {
 	const marker = readMarker(job);
 	if (marker === undefined) return undefined;
@@ -836,9 +765,6 @@ function pollTick(): void {
 			job.endedAt = Date.now();
 		}
 	}
-	// Waiters resolve before the deliver pass: a wait satisfiable this tick
-	// returns beside the steer the same tick arms.
-	resolveWaiters();
 	for (const job of reg.jobs.values()) {
 		deliver(job);
 	}
@@ -858,10 +784,10 @@ function attach(handle: ExtensionAPI): void {
 }
 
 const BACKGROUND_CONTRACT =
-	"Set background:true to run a command detached and continue other work: the call returns at once with a job id and the log path, and when the command finishes its result is delivered to you automatically as its own message - it arrives between your tool calls while you keep working, or wakes an idle session; do not poll or sleep-wait. wait blocks until a job finishes and returns status only; the log path from the start message is for progress while the job runs. timeout, if set, limits total runtime including time in the background. Stop a running background job with stop.";
+	"Set background:true to run a command detached and continue other work: the call returns at once with a job id and the log path, and when the command finishes its result is delivered to you automatically as its own message - it arrives between your tool calls while you keep working, or wakes an idle session; do not poll or sleep-wait. The log path is for progress while the job runs. timeout, if set, limits total runtime including time in the background. Stop a running background job with stop. When nothing useful remains to do, call wait alone to end your turn.";
 
 const SUBAGENT_CONTRACT =
-	"Launch a subagent: a fresh Pi session in this working directory that carries out a task independently. The child starts from the task and ordinary project instructions - never this conversation - with ordinary tools but no subagent tool of its own (no recursive agents). Start is asynchronous: the call returns at once with a job id (sa-N). When it finishes, the final response is delivered here automatically as its own message - between your tool calls while you keep working, or waking an idle session; wait blocks until then and returns status only; stop terminates a running child. The child model is user-configured, not chosen per call.";
+	"Launch a subagent: a fresh Pi session in this working directory that carries out a task independently. The child starts from the task and ordinary project instructions - never this conversation - with ordinary tools but no subagent tool of its own (no recursive agents). Start is asynchronous: the call returns at once with a job id (sa-N). When it finishes, the final response is delivered here automatically as its own message - between your tool calls while you keep working, or waking an idle session; stop terminates a running child. When nothing useful remains to do, call wait alone to end your turn. The child model is user-configured, not chosen per call.";
 
 export default function (handle: ExtensionAPI) {
 	// Bound at factory time, not only at session_start: a completion may land
@@ -895,7 +821,7 @@ export default function (handle: ExtensionAPI) {
 							`Command: ${oneLine(input.command)}`,
 							`Output streams to ${job.logPath} - read it anytime for progress while the job runs.`,
 							job.deadlineAt !== undefined ? `Deadline: ${input.timeout}s total runtime.` : "No deadline.",
-							"When it finishes, the result is delivered here automatically - it arrives between your tool calls; wait blocks until then and returns status only. Continue other work instead of polling.",
+							"When it finishes, the result is delivered here automatically - it arrives between your tool calls. Continue other work instead of polling; when nothing useful remains to do, call wait alone to end your turn.",
 						].join("\n"),
 					},
 				],
@@ -940,189 +866,53 @@ export default function (handle: ExtensionAPI) {
 			};
 		},
 	});
+	// A conversational yield, not a blocking wait: the result carries
+	// terminate, so the run ends right there unless completions were armed in
+	// the same call - those enter as steering messages and the loop continues
+	// into them. No timers, no waiter sets: delivery stays the poller's
+	// steer/triggerTurn path, and wait only arms what is already settled and
+	// undelivered (deliver() is idempotent, so consumed jobs never repeat).
 	handle.registerTool({
 		name: "wait",
-		label: "Wait for background job",
+		label: "Wait for input",
 		description:
-			"Wait for a background job (a bash command started with background:true, or a subagent) that this session started, until it finishes: the call returns status only - one line per job, never an output tail - and the full completion is delivered as its own message alongside this result. Give id (bg-N or sa-N) to wait for one job, or all: true to wait until no background job is still running. timeout (seconds) bounds the wait; on expiry each still-running job gets one status line. Aborting the call ends the wait only - the job keeps running.",
-		parameters: Type.Object({
-			id: Type.Optional(Type.String({ description: "Job id returned by a background bash call (bg-N) or a subagent call (sa-N)" })),
-			all: Type.Optional(Type.Boolean({ description: "Wait until no background job from this session is still running" })),
-			timeout: Type.Optional(Type.Number({ description: "Maximum seconds to wait; omitted means no deadline" })),
-		}),
-		async execute(_toolCallId, params, signal) {
-			const input = params as { id?: string; all?: boolean; timeout?: number };
-			if (input.id !== undefined && input.all === true) {
-				throw new Error("Give either id or all, not both.");
+			"Yield when nothing useful remains to do. Call wait alone, with no arguments and no other tool calls in the same turn. Incoming human messages, worker messages, or job results resume you automatically; do not poll. Already-pending results are delivered first. Jobs keep running. With no background work, yield to the human.",
+		// Declared to the model, never callable from codemode scripts: a script
+		// must not be able to end a run.
+		exposure: "model-only",
+		promptGuidelines: [
+			"Keep doing useful work while background jobs run; their results arrive automatically as their own messages. When nothing useful remains to do, call wait alone - just wait, no arguments, nothing else in the turn - to end your turn. Never poll or sleep-wait for a job's result.",
+		],
+		parameters: Type.Object({}, { additionalProperties: false }),
+		async execute(_toolCallId, params) {
+			const legacy = Object.keys(params ?? {});
+			if (legacy.length > 0) {
+				throw new Error(
+					`wait takes no arguments (received ${legacy.join(", ")}). Call it alone as wait {} when nothing useful remains to do: finished jobs' results are delivered automatically, and running jobs keep running.`,
+				);
 			}
-			if (input.id === undefined && input.all !== true) {
-				throw new Error("Give id (a bg-N or sa-N job id) or all: true.");
-			}
-			validateTimeout(input.timeout);
-			const deadline = input.timeout !== undefined ? Date.now() + input.timeout * 1000 : undefined;
-
-			if (input.id !== undefined) {
-				const job = registry().jobs.get(input.id);
-				if (!job) {
-					return {
-						content: [
-							{ type: "text", text: `No background job ${input.id} in this session. Only jobs started here can be waited on.` },
-						],
-					details: { id: input.id, found: false },
-					};
-				}
-				// Already settled: arm the carrier (idempotent - an armed or
-				// suppressed job no-ops) and return status only; the steer is queued
-				// synchronously, before this tool result reaches the model, so the
-				// completion arrives with the next request.
-				if (!isLive(job)) {
+			const delivered: string[] = [];
+			for (const job of registry().jobs.values()) {
+				if (!isLive(job) && !job.notified) {
 					deliver(job);
-					return {
-						content: [{ type: "text", text: statusLine(job) }],
-						details: { id: job.id, state: job.state, exitCode: job.exitCode ?? null, logPath: job.logPath },
-					};
-				}
-				if (signal?.aborted) {
-					return {
-						content: [{ type: "text", text: `Wait aborted - ${job.id} still running, untouched.` }],
-						details: { id: job.id, aborted: true },
-					};
-				}
-				// Register synchronously - before any await - so a pollTick firing
-				// between this call and registration cannot strand the wait.
-				const waiter: JobWaiter = { job, resolve: () => {} };
-				const settleP = new Promise<WaitEnd>((resolve) => {
-					waiter.resolve = resolve;
-				});
-				jobWaiters.add(waiter);
-				const onAbort = (): void => waiter.resolve("abort");
-				let timer: ReturnType<typeof setTimeout> | undefined;
-				try {
-					let end: WaitEnd = "settled";
-					for (;;) {
-						// A stop already in flight is awaited through its shared
-						// promise, not a second watcher path.
-						const kill = killsInFlight.get(job.id);
-						if (deadline !== undefined) {
-							const remaining = deadline - Date.now();
-							if (remaining <= 0) {
-								end = "timeout";
-								break;
-							}
-							timer = setTimeout(() => waiter.resolve("timeout"), remaining);
-						}
-						signal?.addEventListener("abort", onAbort, { once: true });
-						const legs: Promise<WaitEnd>[] = [settleP];
-						if (kill !== undefined) legs.push(kill.then((): WaitEnd => "kill"));
-						end = await Promise.race(legs);
-						clearTimeout(timer);
-						timer = undefined;
-						signal?.removeEventListener("abort", onAbort);
-						// A stop can end unresolved (the group survived); the job is
-						// still live and the waiter still registered - wait on.
-						if (end === "kill" && isLive(job)) continue;
-						break;
-					}
-					// Compose from state, not from the winning leg: a job that
-					// settled as the wait ended must not lose its completion - arm
-					// the carrier and return status beside it.
-					if (!isLive(job)) {
-						deliver(job);
-						return {
-							content: [{ type: "text", text: statusLine(job) }],
-							details: { id: job.id, state: job.state, exitCode: job.exitCode ?? null, logPath: job.logPath },
-						};
-					}
-					if (end === "timeout") {
-						return {
-							content: [{ type: "text", text: stillRunningLine(job) }],
-							details: { id: job.id, stillRunning: true },
-						};
-					}
-					return {
-						content: [{ type: "text", text: `Wait aborted - ${job.id} still running, untouched.` }],
-						details: { id: job.id, aborted: true },
-					};
-				} finally {
-					jobWaiters.delete(waiter);
-					if (timer !== undefined) clearTimeout(timer);
-					signal?.removeEventListener("abort", onAbort);
+					if (job.notified) delivered.push(job.id);
 				}
 			}
-
-			// all: true - resolve when no live job remains; settled-but-undelivered
-			// jobs contribute their texts, everything else a one-liner.
-			if (liveJobs().length === 0) {
-				return { content: [{ type: "text", text: composeAllWait() }], details: { all: true, pending: 0 } };
+			const live = liveJobs();
+			const parts: string[] = [];
+			if (delivered.length > 0) parts.push(`Results delivered for: ${delivered.join(", ")}.`);
+			if (live.length > 0) {
+				parts.push(
+					`Still running: ${live
+						.map((j) => `${j.id} ${timerField(Date.now() - j.startedAt, jobTotalMs(j))}`)
+						.join(", ")} - each result arrives automatically as its own message.`,
+				);
 			}
-			if (signal?.aborted) {
-				return { content: [{ type: "text", text: abortAllText() }], details: { all: true, aborted: true } };
-			}
-			const allWaiter: AllWaiter = { resolve: () => {} };
-			const allSettleP = new Promise<WaitEnd>((resolve) => {
-				let ended = false;
-				allWaiter.resolve = (end) => {
-					// First end wins: a late abort firing after resolveWaiters
-					// resolved must not overwrite the end.
-					if (ended) return;
-					ended = true;
-					resolve(end);
-				};
-			});
-			allWaiters.add(allWaiter);
-			const onAllAbort = (): void => allWaiter.resolve("abort");
-			let allTimer: ReturnType<typeof setTimeout> | undefined;
-			try {
-				let end: WaitEnd = "settled";
-				for (;;) {
-					const kills = [
-						...new Set(
-							liveJobs()
-								.map((j) => killsInFlight.get(j.id))
-								.filter((k): k is Promise<string> => k !== undefined),
-						),
-					];
-					if (deadline !== undefined) {
-						const remaining = deadline - Date.now();
-						if (remaining <= 0) {
-							end = "timeout";
-							break;
-						}
-						allTimer = setTimeout(() => allWaiter.resolve("timeout", []), remaining);
-					}
-					signal?.addEventListener("abort", onAllAbort, { once: true });
-					const legs: Promise<WaitEnd>[] = [
-						allSettleP,
-						...kills.map((k) => k.then((): WaitEnd => "kill")),
-					];
-					end = await Promise.race(legs);
-					clearTimeout(allTimer);
-					allTimer = undefined;
-					signal?.removeEventListener("abort", onAllAbort);
-					if (end === "kill" && liveJobs().length > 0) continue;
-					break;
-				}
-				if (liveJobs().length === 0) {
-					// Status lines for every settled job; composeAllWait arms any
-					// delivery the poller has not reached, whatever the end was.
-					return {
-						content: [{ type: "text", text: composeAllWait() }],
-						details: { all: true },
-					};
-				}
-				if (end === "timeout") {
-					const live = liveJobs();
-					return {
-						content: [{ type: "text", text: live.map(stillRunningLine).join("\n") }],
-						details: { all: true, stillRunning: live.length },
-					};
-				}
-				return { content: [{ type: "text", text: abortAllText() }], details: { all: true, aborted: true } };
-			} finally {
-				allWaiters.delete(allWaiter);
-				if (allTimer !== undefined) clearTimeout(allTimer);
-				signal?.removeEventListener("abort", onAllAbort);
-			}
+			return {
+				content: [{ type: "text", text: ["Yielding. Incoming messages or results will resume this session.", ...parts].join(" ") }],
+				details: { delivered, running: live.map((j) => j.id) },
+				terminate: true,
+			};
 		},
 	});
 	// Registered only outside subagent children: the child marker set by
@@ -1156,7 +946,7 @@ export default function (handle: ExtensionAPI) {
 								`Subagent ${job.id} started (pid ${job.pid}).`,
 								`Task: ${oneLine(task)}`,
 								`Model: ${model}`,
-								`When it finishes, the final response is delivered here automatically - it arrives between your tool calls; wait blocks until then and returns status only. Continue other work instead of polling.`,
+								`When it finishes, the final response is delivered here automatically - it arrives between your tool calls. Continue other work instead of polling; when nothing useful remains to do, call wait alone to end your turn.`,
 								`No intermediate progress: ${job.errPath} collects diagnostics if it fails; the result lands in ${job.logPath} at completion.`,
 							].join("\n"),
 						},
@@ -1222,11 +1012,7 @@ export default function (handle: ExtensionAPI) {
 		if (event.reason === "reload") {
 			// Jobs keep running; this instance's handle must never deliver again.
 			// ui stays: this copy's pollTick keeps the footer honest until the
-			// replacement instance attaches. Pending waits die with this module
-			// copy - dropping the waiter sets keeps its last ticks from claiming
-			// a completion (notified) that only a live caller could ever return.
-			jobWaiters.clear();
-			allWaiters.clear();
+			// replacement instance attaches.
 			pi = undefined;
 			return;
 		}

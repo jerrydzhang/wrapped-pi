@@ -84,15 +84,6 @@ function readFacts(path) {
 	}
 }
 
-async function withKeepalive(promise) {
-	const keep = setInterval(() => {}, 100);
-	try {
-		return await promise;
-	} finally {
-		clearInterval(keep);
-	}
-}
-
 test("registers subagent alongside the shared wait and stop", () => {
 	const app = fresh();
 	const subagent = app.subagent();
@@ -340,7 +331,7 @@ test(
 		assert.match(text, /Task: say hi and report/);
 		assert.match(text, /Model: test\/mini/);
 		assert.match(text, /delivered here automatically/);
-		assert.match(text, /returns status only/);
+		assert.match(text, /call wait alone/);
 		assert.equal(jobs().length, 1);
 		assert.equal(jobs()[0].kind, "subagent");
 		await app.stop().execute("c2", { id: "sa-1" });
@@ -384,50 +375,39 @@ test(
 );
 
 test(
-	"wait returns status only and arms the child's completion",
-	withFakeCli(async () => {
-		const app = fresh();
-		await app.subagent().execute("c1", { task: "SLOW-SAY:1:result-in-turn" }, undefined, undefined, testCtx("/tmp"));
-		const out = await withKeepalive(app.wait().execute("c2", { id: "sa-1" }));
-		assert.equal(out.content[0].text, "sa-1 finished.");
-		await waitFor(() => app.sent.length === 1);
-		assert.match(app.sent[0].message.content, /result-in-turn/);
-		assert.deepEqual(app.sent[0].options, { deliverAs: "steer", triggerTurn: true });
-		await new Promise((r) => setTimeout(r, 800));
-		assert.equal(app.sent.length, 1, "exactly one completion");
-	}),
-);
-
-test(
-	"wait timeout leaves the child running with a one-line status",
+	"wait leaves a running child untouched and yields at once",
 	withFakeCli(async () => {
 		const app = fresh();
 		await app.subagent().execute("c1", { task: "HANG" }, undefined, undefined, testCtx("/tmp"));
-		const out = await app.wait().execute("c2", { id: "sa-1", timeout: 1 });
-		const text = out.content[0].text;
-		assert.equal(text.split("\n").length, 1, "exactly one line");
-		assert.match(text, /^sa-1 still running, \d+s\.$/);
-		assert.ok(!text.includes("Result"), "no result tail");
-		const job = jobs()[0];
-		assert.equal(job.state, "running", "timeout leaves the child running");
+		const out = await app.wait().execute("c2", {});
+		assert.equal(out.terminate, true);
+		assert.match(out.content[0].text, /Still running: sa-1/);
+		assert.equal(app.sent.length, 0, "nothing delivered for a running child");
+		assert.equal(jobs()[0].state, "running");
 		const stopped = await app.stop().execute("c3", { id: "sa-1" });
 		assert.match(stopped.content[0].text, /sa-1 stopped/);
 	}),
 );
 
 test(
-	"aborting a wait leaves the child running and its delivery intact",
+	"wait arms a settled-undelivered child result exactly once and never repeats",
 	withFakeCli(async () => {
 		const app = fresh();
-		await app.subagent().execute("c1", { task: "SLOW-SAY:1:abort-delivered" }, undefined, undefined, testCtx("/tmp"));
-		const controller = new AbortController();
-		const waitP = withKeepalive(app.wait().execute("c2", { id: "sa-1" }, controller.signal));
-		await new Promise((r) => setTimeout(r, 150));
-		controller.abort();
-		const out = await waitP;
-		assert.match(out.content[0].text, /^Wait aborted - sa-1 still running, untouched\.$/);
-		await waitFor(() => app.sent.length === 1);
-		assert.match(app.sent[0].message.content, /abort-delivered/, "the aborted wait did not consume the completion");
+		await app.subagent().execute("c1", { task: "SAY:yield-arm" }, undefined, undefined, testCtx("/tmp"));
+		await waitFor(() => jobs()[0].state === "exited");
+		// The settled/undelivered boundary is sub-tick; reach it the
+		// registry-poking way, in the same macrotask as the wait call.
+		jobs()[0].notified = false;
+		app.sent.length = 0;
+		const out = await app.wait().execute("c2", {});
+		assert.equal(out.terminate, true);
+		assert.match(out.content[0].text, /delivered for: sa-1/);
+		assert.equal(app.sent.length, 1, "the wait armed the completion synchronously");
+		assert.deepEqual(app.sent[0].options, { deliverAs: "steer", triggerTurn: true });
+		assert.match(app.sent[0].message.content, /yield-arm/);
+		const again = await app.wait().execute("c3", {});
+		assert.equal(again.terminate, true);
+		assert.equal(app.sent.length, 1, "consumed results are never repeated");
 	}),
 );
 
@@ -548,35 +528,41 @@ test(
 		bashBackground(second.handle);
 		await second.emit("session_start", { reason: "resume" });
 		assert.equal(second.sent.length, 0);
-		const orphan = await second.wait().execute("c1", { id: "sa-1" });
-		assert.match(orphan.content[0].text, /No background job sa-1 in this session\./);
+		const orphan = await second.wait().execute("c1", {});
+		assert.equal(orphan.terminate, true);
+		assert.match(orphan.content[0].text, /Yielding/);
+		assert.equal(second.sent.length, 0, "an orphaned job is neither adopted nor delivered");
 	}),
 );
 
 test(
-	"a mixed all-wait reports both jobs and arms both completions",
+	"a mixed wait arms both kinds' settled results exactly once",
 	withFakeCli(async () => {
 		const app = fresh();
-		await app.bash().execute("c1", { command: "sleep 1.4; echo mixed-bash-out", background: true }, undefined, undefined, testCtx("/tmp"));
-		await app.subagent().execute("c2", { task: "SLOW-SAY:1.2:mixed-child-result" }, undefined, undefined, testCtx("/tmp"));
-		const out = await withKeepalive(app.wait().execute("c3", { all: true }));
-		const text = out.content[0].text;
-		assert.match(text, /^bg-1 exited with code 0\.$/m);
-		assert.match(text, /^sa-2 finished\.$/m);
+		await app.bash().execute("c1", { command: "echo mixed-bash-out", background: true }, undefined, undefined, testCtx("/tmp"));
+		await app.subagent().execute("c2", { task: "SAY:mixed-child-result" }, undefined, undefined, testCtx("/tmp"));
+		await waitFor(() => jobs().length === 2 && jobs().every((j) => j.state === "exited"));
+		// Same sub-tick boundary, same macrotask: reset delivery and call wait
+		// synchronously so no poller tick can interleave.
+		for (const job of jobs()) job.notified = false;
+		app.sent.length = 0;
+		const out = await app.wait().execute("c3", {});
+		assert.equal(out.terminate, true);
+		assert.match(out.content[0].text, /delivered for: bg-1, sa-2/);
 		await waitFor(() => app.sent.length === 2);
 		assert.match(app.sent[0].message.content, /mixed-bash-out/);
 		assert.match(app.sent[1].message.content, /mixed-child-result/);
+		const again = await app.wait().execute("c4", {});
+		assert.equal(app.sent.length, 2, "no repetition on the next yield");
 	}),
 );
 
-test("wait and stop refuse an unknown subagent id with the shared shape", async () => {
+test("stop refuses an unknown subagent id; wait refuses legacy arguments", async () => {
 	const app = fresh();
-	const waited = await app.wait().execute("c1", { id: "sa-9" });
-	assert.match(waited.content[0].text, /No background job sa-9 in this session\./);
-	assert.match(waited.content[0].text, /Only jobs started here can be waited on\./);
 	const stopped = await app.stop().execute("c2", { id: "sa-9" });
 	assert.match(stopped.content[0].text, /No background job sa-9 in this session\./);
 	assert.match(stopped.content[0].text, /Only jobs started here can be stopped\./);
+	await assert.rejects(app.wait().execute("c1", { id: "sa-9" }), /wait takes no arguments/);
 });
 
 test(

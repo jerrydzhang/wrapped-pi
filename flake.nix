@@ -35,6 +35,15 @@
     checks = forAllSystems (system: let
       pkgs = nixpkgs.legacyPackages.${system};
     in {
+      wait-runtime = pkgs.runCommand "wrapped-pi-wait-runtime-tests" {
+        nativeBuildInputs = [pkgs.nodejs];
+        PI_TEST_MODULES = "${pi.packages.${system}.pi}/lib/pi/node_modules";
+      } ''
+        cp -R ${./extensions} extensions
+        chmod -R u+w extensions
+        node --import ./extensions/tests/register.mjs --test extensions/tests/wait-runtime.test.ts
+        touch "$out"
+      '';
       extensions = pkgs.runCommand "wrapped-pi-extension-tests" {
         nativeBuildInputs = [pkgs.nodejs pkgs."poppler-utils"];
       } ''

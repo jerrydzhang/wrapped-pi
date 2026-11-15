@@ -5,8 +5,8 @@ commands through the `bash` tool, and subagents that relaunch Pi itself on a
 task. Both kinds share one lifecycle - a background start returns at once,
 and when the job finishes its completion is delivered to the session
 automatically: it enters between the model's tool calls while a run is
-active, or wakes an idle session. `wait` blocks until a job finishes and
-returns status only.
+active, or wakes an idle session. When nothing useful remains to do, `wait`
+ends the model's turn while jobs keep running; results arrive either way.
 
 Independently authored; no third-party extension code. Bundled by the
 wrapped-pi executable without installing files into Pi's configuration.
@@ -19,8 +19,8 @@ wrapped-pi executable without installing files into Pi's configuration.
 - A background call returns at once with a session-local job reference
   (`bg-N`), the pid, and a temporary output-log path. Reading that log (with
   the ordinary `read` tool) is for progress while a job runs; the completion
-  itself arrives as its own message — `wait` reports status, and `stop`'s
-  result is the outcome.
+  itself arrives as its own message — `stop`'s result is the outcome, and
+  `wait` ends the turn when nothing useful remains.
 - **`subagent { task }`** — launches one child Pi in the same working
   directory with fresh context: the task and ordinary project instructions
   (AGENTS.md and friends), never the parent conversation. The child gets the
@@ -47,19 +47,22 @@ wrapped-pi executable without installing files into Pi's configuration.
   names the job, the outcome, the runtime, a bounded tail, and —
   unconditionally — the full-output path: the completion is the terminal
   carrier of the log path, present on every branch.
-- **`wait {id}` / `{all: true, timeout?}`** — synchronization, not fetching:
-  blocks until background job(s) this session started (either kind) finish,
-  then returns status only — one line per job, never an output tail. The full
-  completion is delivered as its own message alongside the wait's result: the
-  call arms the delivery synchronously, so the completion is queued before
-  the wait's tool result reaches the model, and both are visible at its next
-  request. `all: true` resolves when nothing is still running — one status
-  line per settled job, bash and subagent jobs mixing freely. `timeout` bounds
-  the wait in seconds; on expiry each still-running job reports one status
-  line (elapsed, and total when the job carries a deadline). Aborting the
-  call ends the wait only; the job keeps running. Pointers ride boundaries —
-  the start message carries the standing log path, the completion carries it
-  terminally — and no pull (`wait` or `stop`) repeats them.
+- **`wait`** — the conversational yield: when nothing useful remains to do
+  while background jobs run, the model calls `wait` alone (no arguments,
+  nothing else in the turn) and the turn ends there. The call first arms
+  every finished-but-undelivered completion — each exactly once, as its own
+  message, which the run then consumes before it ends — and names what is
+  still running; jobs keep running and their completions arrive
+  automatically later, between tool calls in a future run or waking an idle
+  session. Human input also starts a response normally: no cancellation or
+  Escape is required to speak through a wait. With no jobs it yields to the
+  human the same way, without making another model request. Legacy arguments (`id`,
+  `all`, `timeout`) are refused with the current usage — by the strict
+  schema and again in execute. The tool is `model-only`: declared to the
+  model, never callable from codemode scripts, so a script cannot end a
+  run. Pointers ride boundaries — the start message carries the standing
+  log path, the completion carries it terminally — and no pull (`wait` or
+  `stop`) repeats them.
 - **`stop {id}`** — stops a background job this session started (either kind)
   by terminating its process group (SIGTERM, then SIGKILL), and reports the
   observed outcome honestly; it does not claim settlement that did not happen.
@@ -176,8 +179,8 @@ tool; it is expected and harmless.
 - Output logs are plain temporary files under the OS temp directory, used only
   for result retrieval and mid-run inspection; there are no job records, no
   persistence, no recovery, and no model-facing list/status/output tools
-  (`wait` is synchronization over jobs the session started — it returns
-  completions, it is not job tooling) — this is not a job platform.
+  (`wait` is a conversational turn-yield over jobs the session started, not
+  job tooling) — this is not a job platform.
   Human-facing visibility (the footer line and the `/bg` card) is read-only
   over in-memory state.
 - No Saccade semantics anywhere: the extension is fully generic.
