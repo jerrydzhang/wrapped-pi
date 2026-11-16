@@ -62,6 +62,7 @@ test("background start returns promptly with job id, log path and delivery contr
 		assert.match(out.content[0].text, /bg-1 started \(pid \d+\)/);
 		assert.match(out.content[0].text, /Output streams to \S+/);
 		assert.match(out.content[0].text, /No deadline\./);
+		assert.deepEqual(out.details, { truncation: undefined, backgroundJob: { id: "bg-1" } }, "worker status tracks the structured job id, not result text");
 		assert.match(out.content[0].text, /delivered here automatically/);
 		assert.match(out.content[0].text, /instead of polling/);
 	} finally {

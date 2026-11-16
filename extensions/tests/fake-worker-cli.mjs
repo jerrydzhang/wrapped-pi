@@ -11,6 +11,8 @@
 //   SLOW-SAY:seconds:text  reply with text after a delay
 //   REMEMBER:value/RECALL  store and replay conversation memory across turns
 //   QUESTION:text          send the parent a worker message, then yield idle
+//   WAIT-JOBS:ms:text      yield with progress text, then auto-resume and reply
+//   YIELD                  wait with no job or message (unexplained)
 //   TURN-ERROR:text        end the turn with an error; the process stays up
 //   FAIL:text              write text to stderr, then exit 1 (responses flush first)
 //   HANG                   stay busy until shutdown (accepts queued steering)
@@ -95,6 +97,21 @@ function run(task, from) {
 			};
 			exitWhenFlushed();
 		});
+	} else if (task.startsWith("WAIT-JOBS:") || task === "YIELD") {
+		const [, ms = "0", progress = ""] = task.split(":");
+		emit({ type: "message_end", message: { role: "assistant", stopReason: "toolUse", content: [
+			{ type: "text", text: progress }, { type: "toolCall", id: "wait-1", name: "wait", arguments: {} },
+		] } });
+		emit({ type: "tool_execution_end", toolCallId: "wait-1", toolName: "wait", isError: false,
+			result: { content: [], details: { running: task === "YIELD" ? [] : ["bg-1"] }, terminate: true } });
+		busy = false;
+		emit({ type: "agent_settled", aborted: false });
+		if (task !== "YIELD") timer = setTimeout(() => {
+			busy = true;
+			emit({ type: "agent_start" });
+			emit({ type: "message_end", message: { role: "custom", customType: "bash-background-result", content: "job finished", details: { id: "bg-1" } } });
+			finish("automatic final reply");
+		}, Number(ms));
 	} else if (task.startsWith("TURN-ERROR:")) {
 		emit({ type: "message_end", message: { role: "assistant", content: [], stopReason: "error", errorMessage: task.slice(11) } });
 		busy = false;

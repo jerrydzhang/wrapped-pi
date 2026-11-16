@@ -51,10 +51,11 @@ cannot use `subagent` recursively. This is recursion prevention, not a security
 boundary: a child can still launch programs through bash.
 
 A worker is one long-lived Pi RPC subprocess with an in-memory conversation.
-After completing a turn it becomes **idle**, not destroyed. Replies arrive
-automatically; use `message` with the same id for another turn. A failed model
-turn is reported without pretending its task succeeded, and can receive a
-follow-up if its process remains alive. Explicit `stop` terminates and forgets
+After completing a run it remains addressable, not destroyed. A run ending is
+not proof that the assigned task is complete. Natural text replies arrive as
+**Reply from worker**; use `message` with the same id for follow-up work or
+answers. A failed or interrupted run reports its reason explicitly and can
+receive a follow-up if its process remains alive. Explicit `stop` terminates and forgets
 it: the worker cannot be messaged or resumed and disappears from `/bg`.
 There is no pause-without-termination option, per-call model override, or task
 timeout.
@@ -79,8 +80,39 @@ timeout.
 Worker replies have a 64 KiB byte budget, without bash's 20-line tail cap.
 The full structured event transcript is always available at its log path.
 Tool transcripts are available to the human inspector, not automatically
-injected into parent model context. A worker finishing a turn and its process
+injected into parent model context. A worker finishing a run and its process
 exiting are distinct events.
+
+### Worker waiting and replies
+
+- **Waiting on background work:** the footer and `/bg` show the worker's pending
+  child-job ids and that it resumes automatically. These ids belong to that
+  worker, not the parent's `bg-N` namespace; parent `stop` cannot address them.
+  This is quiet status, not a parent notification. Tests or commit hooks can run in the background while the
+  child's Pi run is idle; their results resume the child normally. Do not send
+  `continue` nudges or poll its worktree because it is waiting.
+- **Questions, blockers, and progress sent with `message`:** delivered immediately.
+  If the worker then waits without background work, its status is **waiting for
+  input after message**. There is no redundant yield notification. This describes
+  its lifecycle, not a semantic classification of the message: a worker can also
+  send a completed report via `message` and then wait.
+- **Replies:** a natural assistant text response without tool calls is delivered
+  as a reply, not a task-completion assertion. Text accompanying a tool call
+  (including `wait`) remains progress in the inspector, never a final reply.
+  Explicit progress notifications should use `message`.
+- **Unexplained stop:** if a worker ends without a reply, pending background work,
+  or a message to the parent, the parent receives an explicit status notice:
+  `Worker ended its turn without a reply. No background work is pending; it will
+  not resume automatically.` The extension does not silently restart it.
+- **Interruptions and errors:** notify the parent with structured reason metadata
+  (`interrupted` or `error`), even if a message was already sent or jobs remain.
+  No automatic continuation is promised for that interrupted/failed run. Existing
+  background jobs keep their normal delivery behavior; they are not cancelled.
+
+Reply/status notice details include the settlement `reason`. A reply resumed by
+an automatic background result identifies that trigger rather than claiming a
+new parent message started it. Parent Escape continues to interrupt only the
+parent run, not its workers. No extra model calls or automatic nudges are added.
 
 ### `stop { id }`
 
@@ -89,13 +121,16 @@ orderly shutdown; the shared process-group TERM-then-KILL ladder provides a
 bounded backstop. Workers receive 5 seconds of TERM grace versus bash's 2
 seconds, allowing their own detached-job cleanup to escalate before the parent
 kills them. Surviving or unsignalable groups are reported honestly, not falsely
-claimed stopped. An explicit stop suppresses further automatic replies;
+claimed stopped. A successful explicit stop suppresses further automatic replies;
 its result is the outcome.
 
 A successfully stopped worker is removed from the session registry, `/bg`,
 and parent memory rather than retained as a closed conversation. Stopping an
 already-ended worker also discards its entry. If the process group may still
 be alive, the entry remains visible instead of hiding an unresolved stop.
+A failed stop does not mute subsequent replies, errors, or eventual process-exit
+notices. Its transport may already be closing, so a further message can still
+fail explicitly rather than claiming submission.
 Private temporary diagnostic/event logs are not deleted; they are not saved,
 resumable Pi sessions. Natural turn completion, unlike stop, keeps the worker
 idle and reusable.
@@ -103,8 +138,10 @@ idle and reusable.
 ## Human observability
 
 The footer shows running bash jobs with elapsed time (and total when timed),
-plus worker phases such as `sa-2 working 12s` and `sa-2 idle`. Idle workers
-remain visible and stoppable.
+plus worker phases such as `sa-2 working 12s`, `sa-2 idle`, and
+`sa-2 waiting on background work: bg-3; resumes automatically`. Waiting-for-input,
+unexplained, and interrupted states stay distinct and visible. All live workers,
+including those with a failed/interrupted run, remain messageable and stoppable.
 
 **`/bg`** opens the live job/worker inspector. **`/bg sa-N`** opens that worker's
 conversation directly. Bash jobs appear alongside workers.

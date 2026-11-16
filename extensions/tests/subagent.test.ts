@@ -146,6 +146,9 @@ function withFacts(fn) {
 		try {
 			await fn(facts);
 		} finally {
+			// A prompt acknowledgement can beat the fixture's final facts write.
+			// Stop writers before deleting their directory (otherwise ENOTEMPTY).
+			await cleanupRegistry();
 			delete process.env.FAKE_PI_FACTS;
 			rmSync(facts.dir, { recursive: true, force: true });
 		}
@@ -403,7 +406,9 @@ test(
 		assert.match(text, /Task: review the flake inputs/);
 		assert.match(text, /Model: test\/mini/);
 		assert.match(text, /Replies and messages arrive automatically/);
-		assert.match(text, /use message with this id to continue/);
+		assert.match(text, /Use message with this id for follow-ups or answers/);
+		assert.match(text, /Background-job waits are quiet and resume automatically; do not nudge/);
+		assert.match(text, /A reply is not proof of task completion/);
 		assert.match(text, /Call wait alone/);
 		assert.match(text, /\/bg sa-1/, "the worker conversation is openable");
 		assert.match(text, /Full event transcript: \S+/);
@@ -521,12 +526,79 @@ test(
 		const { message, options } = app.sent[0];
 		assert.equal(message.customType, "subagent-reply");
 		assert.deepEqual(options, { deliverAs: "steer", triggerTurn: true });
-		assert.equal(message.content, `Turn result from worker sa-1 (turn 1; responding to parent):\nthe final answer\nFull transcript: ${job.logPath}`);
-		assert.deepEqual(message.details, { id: "sa-1", turn: 1, kind: "reply", logPath: job.logPath });
+		assert.equal(message.content, `Reply from worker sa-1 (turn 1; responding to parent):\nthe final answer\nFull transcript: ${job.logPath}`);
+		assert.deepEqual(message.details, { id: "sa-1", turn: 1, kind: "reply", logPath: job.logPath, reason: "reply" });
 		assert.equal(job.worker.phase, "idle", "idle after the reply");
 		assert.equal(job.state, "running", "the process is still alive and addressable");
 		await new Promise((r) => setTimeout(r, 800));
 		assert.equal(app.sent.length, 1, "no duplicate delivery");
+	}),
+);
+
+test(
+	"child background waiting is quiet and visible across reload, then auto-delivers only the final reply",
+	withFakeCli(async () => {
+		const first = await fresh();
+		await first.emit("session_start", { reason: "startup" }, { ui: first.ui(), hasUI: true });
+		const { job } = await launchWorker(first, "WAIT-JOBS:1800:Tests running, not a final answer");
+		const pid = job.pid;
+		await waitFor(() => job.worker.settlement === "waiting-jobs");
+		await first.wait().execute("quiet-wait", {});
+		assert.equal(first.sent.length, 0, "wait does not manufacture mail for a waiting worker");
+		await waitFor(() => first.status.at(-1)?.text?.includes("bg-1; resumes automatically"));
+		assert.match(first.status.at(-1).text, /sa-1 waiting on background work: bg-1; resumes automatically/);
+		await first.emit("session_shutdown", { reason: "reload" });
+		const second = fakePi();
+		bashBackground(second.handle);
+		await second.emit("session_start", { reason: "reload" }, { ui: second.ui(), hasUI: true });
+		assert.equal(jobs()[0].pid, pid);
+		assert.match(second.status.at(-1).text, /bg-1; resumes automatically/);
+		await waitFor(() => second.sent.length === 1);
+		assert.equal(first.sent.length, 0);
+		assert.equal(noticeText(second.sent[0]), "automatic final reply");
+		assert.match(second.sent[0].message.content, /^Reply from worker sa-1 .*resumed by background result/);
+		assert.equal(second.sent[0].message.details.reason, "reply");
+		assert.equal(second.sent[0].message.details.trigger, "background");
+		assert.equal(job.worker.settlement, "reply");
+		await message(second, job.id, "SAY:reused without nudges");
+		await waitFor(() => second.sent.length === 2);
+		assert.equal(noticeText(second.sent[1]), "reused without nudges");
+		assert.match(second.sent[1].message.content, /responding to parent/);
+		assert.equal(second.sent[1].message.details.trigger, undefined);
+	}),
+);
+
+test(
+	"an unexplained wait reports no automatic continuation instead of a normal reply",
+	withFakeCli(async () => {
+		const app = await fresh();
+		const { job } = await launchWorker(app, "YIELD");
+		await waitFor(() => app.sent.length === 1);
+		assert.match(app.sent[0].message.content, /^Status from worker sa-1/);
+		assert.match(noticeText(app.sent[0]), /ended its turn without a reply.*will not resume automatically/);
+		assert.equal(app.sent[0].message.details.kind, "status");
+		assert.equal(app.sent[0].message.details.reason, "unexplained");
+		assert.equal(job.worker.settlement, "unexplained");
+		await message(app, job.id, "SAY:follow-up");
+		await waitFor(() => app.sent.length === 2);
+		assert.equal(noticeText(app.sent[1]), "follow-up");
+	}),
+);
+
+test(
+	"an interrupted worker reports interruption, stays addressable, and can reply on reuse",
+	withFakeCli(async () => {
+		const app = await fresh();
+		const { job } = await launchWorker(app, "HANG");
+		await job.rpc.request({ type: "abort" });
+		await waitFor(() => app.sent.length === 1);
+		assert.match(app.sent[0].message.content, /^Status from worker sa-1/);
+		assert.match(noticeText(app.sent[0]), /interrupted.*No automatic continuation/);
+		assert.equal(app.sent[0].message.details.reason, "interrupted");
+		assert.equal(groupAlive(job.pid), true);
+		await message(app, job.id, "SAY:post-interrupt");
+		await waitFor(() => app.sent.length === 2);
+		assert.equal(noticeText(app.sent[1]), "post-interrupt");
 	}),
 );
 
@@ -553,7 +625,7 @@ test(
 		const payload = "ab🦄".repeat(20000);
 		const { job } = await launchWorker(app, `SAY:${payload}`);
 		await waitFor(() => app.sent.length === 1);
-		const match = /^Turn result from worker sa-1 \(turn 1; responding to parent\):\n([\s\S]*)\nFull transcript: \S+$/.exec(app.sent[0].message.content);
+		const match = /^Reply from worker sa-1 \(turn 1; responding to parent\):\n([\s\S]*)\nFull transcript: \S+$/.exec(app.sent[0].message.content);
 		assert.ok(match, "reply shape with header and transcript pointer");
 		const body = match[1];
 		assert.ok(body.endsWith(TRUNCATION), "the truncation pointer is present");
@@ -607,6 +679,8 @@ test(
 		await waitFor(() => app.sent.length === 2, 10000);
 		assert.equal(app.sent[1].message.customType, "subagent-message");
 		assert.equal(noticeText(app.sent[1]), "Which value holds?");
+		assert.equal(job.worker.settlement, "waiting-input");
+		assert.match(job.worker.activity, /waiting for input/);
 		assert.deepEqual(app.sent[1].message.details, { id: "sa-1", turn: 2, kind: "message", logPath: job.logPath });
 		// No idle wake on top: the question already reported this run.
 		await new Promise((r) => setTimeout(r, 1100));
@@ -710,6 +784,8 @@ test(
 		assert.equal(app.sent[1].message.customType, "subagent-reply");
 		assert.equal(job.worker.phase, "failed");
 		assert.equal(job.worker.error, "provider-down");
+		assert.equal(app.sent[1].message.details.reason, "error");
+		assert.match(app.sent[1].message.content, /^Status from worker sa-1/);
 		assert.equal(groupAlive(pid), true, "a failed turn is not a dead worker");
 		await message(app, "sa-1", "RECALL");
 		await waitFor(() => app.sent.length === 3);
@@ -828,6 +904,9 @@ test(
 		const out = await app.wait().execute("w1", {});
 		assert.equal(out.terminate, true);
 		assert.match(out.content[0].text, /delivered for: sa-1/);
+		assert.match(out.content[0].text, /Workers awaiting input or follow-up: sa-1 \(input\)/);
+		assert.doesNotMatch(out.content[0].text, /Still running: sa-1/);
+		assert.deepEqual(out.details.running, [], "addressable input-waiting workers are not promised to resume automatically");
 		assert.equal(app.sent.length, 1, "the wait armed the notice synchronously");
 		assert.equal(app.sent[0].message.customType, "subagent-reply");
 		assert.match(app.sent[0].message.content, /late-synthetic-notice/);
@@ -938,12 +1017,43 @@ test(
 			assert.equal(job.stopFailed, "denied");
 			assert.equal(jobs()[0], job, "a possibly live worker must never be silently forgotten");
 			assert.equal(groupAlive(job.pid), true);
+			await job.rpc.request({ type: "abort" });
+			await waitFor(() => app.sent.length === 1);
+			assert.equal(app.sent[0].message.details.reason, "interrupted", "a failed stop must not mute subsequent errors");
+			await message(app, job.id, "SAY:still reporting");
+			await waitFor(() => app.sent.length === 2);
+			assert.equal(noticeText(app.sent[1]), "still reporting", "a retained worker can still report replies");
 		} finally {
 			process.kill = kill;
 			job.rpc.closeInput = closeInput;
 		}
 		await app.stop().execute("s2", { id: job.id });
 		assert.equal(jobs().length, 0, "a subsequent successful stop removes the worker");
+	}),
+);
+
+test(
+	"a worker retained after denied stop can still report a later process exit",
+	withFakeCli(async () => {
+		const app = await fresh();
+		const { job } = await launchWorker(app, "HANG");
+		const kill = process.kill;
+		const closeInput = job.rpc.closeInput;
+		try {
+			job.rpc.closeInput = () => {};
+			process.kill = function (pid, signal) {
+				if (pid === -job.pid && signal !== 0) throw Object.assign(new Error("denied"), { code: "EPERM" });
+				return kill.call(process, pid, signal);
+			};
+			await app.stop().execute("denied", { id: job.id });
+		} finally {
+			process.kill = kill;
+			job.rpc.closeInput = closeInput;
+		}
+		kill.call(process, -job.pid, "SIGKILL");
+		await waitFor(() => app.sent.length === 1);
+		assert.match(app.sent[0].message.content, /^Worker sa-1 process ended/);
+		assert.match(app.sent[0].message.content, /signal SIGKILL/);
 	}),
 );
 

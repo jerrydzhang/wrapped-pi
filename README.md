@@ -34,6 +34,10 @@ Workers retain their conversation within the parent session, including
 `/reload`. Use `message` for follow-ups or questions, `/bg` to open live worker
 conversations, and `wait {}` to yield when there is nothing useful to do.
 Human input and incoming results resume the parent without cancelling jobs.
+Workers waiting on their background jobs stay visible in the footer and `/bg`
+but do not wake the parent; job results resume them automatically, without
+`continue` nudges. Replies, messages, errors, interruptions, and unexplained
+stops do notify the parent. A reply is not proof of task completion.
 Natural completion leaves a worker idle and reusable; explicit `stop` terminates
 and removes it from the session and `/bg` (there is no pause state).
 

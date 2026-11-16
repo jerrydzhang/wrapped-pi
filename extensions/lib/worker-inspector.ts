@@ -19,6 +19,9 @@ export interface InspectorRow {
 	state: string;
 	task: string;
 	model?: string;
+	/** Parent-provided one-line status. For waiting/input/unexplained/
+	 *  interrupted rows the list surfaces it beside the task, so pending bg
+	 *  ids and auto-resume are identifiable without opening the detail. */
 	activity?: string;
 	startedAt: number;
 	endedAt?: number;
@@ -96,20 +99,48 @@ export type StateTone = "accent" | "warning" | "error" | "success" | "muted";
 /**
  * Map a parent-provided state string to a theme color. Pattern-based because
  * the parent owns state vocabulary; unknown states stay muted rather than
- * guessing a vivid color.
+ * guessing a vivid color. Waiting on jobs or input warns (attention, not
+ * failure); a run cut short while the process lives warns too; a turn that
+ * ended with nothing to show is an anomaly and errors.
  */
 export function stateTone(state: string): StateTone {
 	const s = String(state).toLowerCase();
-	if (/(fail|error|abort)/.test(s)) return "error";
-	if (/(stop|kill|cancel|timeout)/.test(s)) return "warning";
+	if (/(fail|error|abort|unexplained)/.test(s)) return "error";
+	if (/(stop|kill|cancel|timeout|waiting|input|interrupt)/.test(s)) return "warning";
 	if (/(run|work|start|stream|think|respond|retry|compact|busy)/.test(s)) return "accent";
 	if (/(idle|exit|finish|done|complete|ready|success)/.test(s)) return "success";
 	return "muted";
 }
 
-/** Addressable idle/failed-turn workers are alive; terminal outcomes are not. */
+/** Addressable workers are alive: active, parked after a turn, waiting on
+ *  jobs or input, or a failed/interrupted turn the process survived. Terminal
+ *  outcomes are not. */
 export function isLiveState(state: string): boolean {
-	return /^(starting|working|running|stopping|idle|failed)$/.test(state.toLowerCase());
+	return /^(starting|working|running|stopping|idle|failed|waiting|input|interrupted|unexplained)$/.test(
+		state.toLowerCase(),
+	);
+}
+
+/** Attention states whose list row must identify what is pending (bg ids,
+ *  auto-resume) via the parent-provided activity. */
+const LIST_CONTEXT_STATES = /^(waiting|input|unexplained|interrupted)$/;
+
+/**
+ * One-line pending-job context for a list row: the parent's activity, shown
+ * only for attention states, sanitized and collapsed to a single line. The
+ * known waiting label compacts so the bg id and automatic resumption both
+ * fit a standard-width list row; every other label passes through verbatim.
+ * Presentation only - nothing is decided from the text. The detail view
+ * always shows the parent's full activity.
+ */
+const COMPACT_WAITING = /^waiting on background work: (.+); resumes automatically$/;
+
+export function listActivityContext(state: string, activity: string | undefined): string {
+	if (typeof activity !== "string" || !LIST_CONTEXT_STATES.test(String(state).toLowerCase())) return "";
+	const text = sanitizeWorkerText(activity).replace(/\s+/g, " ").trim();
+	const waiting = COMPACT_WAITING.exec(text);
+	const ids = waiting === null ? "" : waiting[1]!.trim();
+	return waiting === null || ids === "" ? text : `${ids} (auto-resume)`;
 }
 
 /** FNV-1a plus length: cheap change detection for large transcript strings. */
@@ -674,6 +705,20 @@ class WorkerInspectorComponent implements Component {
 		return lines;
 	}
 
+	/** The list row's task slot: the task, plus - for attention states - the
+	 *  parent's pending-job context in parentheses. The task is cut first so
+	 *  the context keeps its room: a waiting row must still name its bg ids
+	 *  and auto-resume when the task text is long. */
+	private taskWithContext(row: InspectorRow, state: string, cols: number): string {
+		const task = sanitizeWorkerText(row.task);
+		const context = listActivityContext(state, row.activity);
+		if (context === "") return this.cut(task, cols);
+		const suffix = ` (${context})`;
+		const suffixCols = this.m.visibleWidth(suffix);
+		const taskPart = suffixCols < cols ? this.cut(task, cols - suffixCols) : "";
+		return this.cut(`${taskPart}${suffix}`, cols);
+	}
+
 	private renderListRow(row: InspectorRow, selected: boolean, width: number): string {
 		const th = this.theme;
 		const id = sanitizeWorkerText(row.id);
@@ -683,11 +728,13 @@ class WorkerInspectorComponent implements Component {
 		let line: string;
 		if (width < COMPACT_WIDTH) {
 			const taskCols = Math.max(4, width - 2 - COMPACT_ID_COL);
+			const stateCols = Math.max(6, Math.floor(taskCols / 3));
+			const textCols = Math.max(4, taskCols - stateCols);
 			line =
 				(selected ? th.fg("accent", "> ") : "  ") +
 				th.fg(selected ? "accent" : "muted", this.pad(id, COMPACT_ID_COL)) +
-				th.fg(tone, this.pad(state, Math.max(6, Math.floor(taskCols / 3)))) +
-				this.cut(sanitizeWorkerText(row.task), Math.max(4, taskCols - Math.max(6, Math.floor(taskCols / 3))));
+				th.fg(tone, this.pad(state, stateCols)) +
+				this.cut(this.taskWithContext(row, state, textCols), textCols);
 		} else {
 			const taskCols = Math.max(4, width - 2 - ID_COL - KIND_COL - STATE_COL - ELAPSED_COL - 3);
 			line =
@@ -697,7 +744,7 @@ class WorkerInspectorComponent implements Component {
 				th.fg(tone, this.pad(state, STATE_COL)) +
 				th.fg("dim", this.rightAlign(elapsed, ELAPSED_COL)) +
 				"  " +
-				this.cut(sanitizeWorkerText(row.task), taskCols);
+				this.cut(this.taskWithContext(row, state, taskCols), taskCols);
 		}
 		const fitted = this.m.truncateToWidth(line, width, "", true);
 		if (!selected) return fitted;

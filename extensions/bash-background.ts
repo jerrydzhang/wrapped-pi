@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { WorkerRpc } from "./lib/worker-rpc.ts";
 import {
-	applyWorkerRecord, newWorkerState, validateWorkerMessage,
+	applyWorkerRecord, newWorkerState, validateWorkerMessage, workerLabel, workerStatus,
 	WORKER_INBOX_COMMAND, WORKER_MESSAGE_ENTRY, type WorkerState,
 } from "./lib/worker-state.ts";
 import { Type } from "typebox";
@@ -557,7 +557,7 @@ function refreshStatus(): void {
 		return;
 	}
 	const parts = live.map((j) => j.kind === "subagent" && j.worker
-		? `${j.id} ${j.stopping ? "stopping" : j.worker.phase}${j.worker.phase === "working" ? ` ${fmtElapsedMs(Date.now() - j.startedAt)}` : ""}`
+		? `${j.id} ${j.stopping ? "stopping" : workerStatus(j.worker)}${j.worker.phase === "working" ? ` ${fmtElapsedMs(Date.now() - j.startedAt)}` : ""}`
 		: `${j.id} ${timerField(Date.now() - j.startedAt, jobTotalMs(j))}`);
 	ui.setStatus(STATUS_KEY, ui.theme.fg("dim", parts.join(", ")));
 }
@@ -650,15 +650,20 @@ function deliver(job: BgJob): void {
 	try {
 		if (deliveryContext?.isIdle && !deliveryContext.isIdle() && !deliveryContext.signal) return;
 	} catch { return; } // A stale reload context must never claim delivery.
-	if (pi && job.kind === "subagent" && job.worker && !job.stopping && job.stopReason !== "stopped") {
+	if (pi && job.kind === "subagent" && job.worker && !job.stopping && (job.stopReason !== "stopped" || job.stopFailed)) {
 		while (job.worker.notices.length > 0) {
 			const notice = job.worker.notices[0];
 			try {
+				const label = notice.kind === "message" ? "Message from" : notice.kind === "reply" ? "Reply from" : "Status from";
+				const source = notice.trigger === "background"
+					? `resumed by background result; last input from ${notice.source ?? "parent"}`
+					: `responding to ${notice.source ?? "parent"}`;
 				pi.sendMessage({
 					customType: notice.kind === "message" ? "subagent-message" : "subagent-reply",
-					content: `${notice.kind === "message" ? "Message from" : "Turn result from"} worker ${job.id} (turn ${notice.turn}; responding to ${notice.source ?? "parent"}):\n${notice.text}\nFull transcript: ${job.logPath}`,
+					content: `${label} worker ${job.id} (turn ${notice.turn}; ${source}):\n${notice.text}\nFull transcript: ${job.logPath}`,
 					display: true,
-					details: { id: job.id, turn: notice.turn, kind: notice.kind, logPath: job.logPath },
+					details: { id: job.id, turn: notice.turn, kind: notice.kind, logPath: job.logPath,
+						...(notice.reason ? { reason: notice.reason } : {}), ...(notice.trigger ? { trigger: notice.trigger } : {}) },
 				}, { deliverAs: "steer", triggerTurn: true });
 				job.worker.notices.shift();
 			} catch { break; }
@@ -778,6 +783,9 @@ async function stopJob(job: BgJob, reason: "stopped" | "timeout"): Promise<strin
 		// running and later ticks keep watching for a natural exit.
 		job.stopping = false;
 		job.stopFailed = denied ? "denied" : "survived";
+		// A failed stop did not establish termination. Keep future worker
+		// replies/errors and an eventual process exit observable.
+		if (job.kind === "subagent") job.notified = false;
 		return denied
 			? "could not be stopped: the command group could not be signalled (permission denied) and may still be running"
 			: "could not be stopped: the command group survived SIGKILL and may still be running";
@@ -872,7 +880,7 @@ const BACKGROUND_CONTRACT =
 	"Set background:true to run a command detached and continue other work: the call returns at once with a job id and the log path, and when the command finishes its result is delivered to you automatically as its own message - it arrives between your tool calls while you keep working, or wakes an idle session; do not poll or sleep-wait. The log path is for progress while the job runs. timeout, if set, limits total runtime including time in the background. Stop a running background job with stop. When nothing useful remains to do, call wait alone to end your turn.";
 
 const SUBAGENT_CONTRACT =
-	"Launch an addressable worker: a fresh Pi conversation in this working directory, starting from the task and ordinary project instructions - never this conversation - with ordinary tools but no subagent tool of its own (no recursive agents). Returns a stable sa-N id. Replies and messages arrive here automatically, between tool calls or waking you while idle. After a turn the worker becomes idle and retains its conversation: use message with its id to continue or answer a question, and stop to terminate it. Workers live only within this parent session, including /reload, never across parent exit or replacement. Call wait alone when nothing useful remains; never poll. The child model is user-configured, not chosen per call.";
+	"Launch an addressable worker: a fresh Pi conversation in this working directory, starting from the task and ordinary project instructions - never this conversation - with ordinary tools but no subagent tool of its own (no recursive agents). Returns a stable sa-N id. Replies, messages, interruptions, errors, and unexplained stops arrive automatically, between tool calls or waking you while idle. Waiting on the worker's background jobs is quiet; those jobs resume it automatically, so do not send continue nudges. A reply ends a run; it is not proof of task completion. The worker retains its conversation: use message with its id for follow-ups or answers, and stop to terminate it. Workers live only within this parent session, including /reload, never across parent exit or replacement. Call wait alone when nothing useful remains; never poll. The child model is user-configured, not chosen per call.";
 
 export default function (handle: ExtensionAPI) {
 	// Bound at factory time, not only at session_start: a completion may land
@@ -910,7 +918,7 @@ export default function (handle: ExtensionAPI) {
 						].join("\n"),
 					},
 				],
-				details: undefined,
+				details: { truncation: undefined, backgroundJob: { id: job.id } },
 			};
 		},
 	});
@@ -984,18 +992,21 @@ export default function (handle: ExtensionAPI) {
 				if ((pending && job.notified) || (job.kind === "subagent" && notices > (job.worker?.notices.length ?? 0))) delivered.push(job.id);
 			}
 			const live = liveJobs();
+			const running = live.filter((job) => job.kind !== "subagent" || !job.worker || ["starting", "working"].includes(job.worker.phase) || job.worker.settlement === "waiting-jobs");
+			const parked = live.filter((job) => !running.includes(job));
 			const parts: string[] = [];
 			if (delivered.length > 0) parts.push(`Results delivered for: ${delivered.join(", ")}.`);
-			if (live.length > 0) {
+			if (running.length > 0) {
 				parts.push(
-					`Still running: ${live
+					`Still running: ${running
 						.map((j) => `${j.id} ${timerField(Date.now() - j.startedAt, jobTotalMs(j))}`)
 						.join(", ")} - each result arrives automatically as its own message.`,
 				);
 			}
+			if (parked.length > 0) parts.push(`Workers awaiting input or follow-up: ${parked.map((job) => `${job.id} (${job.kind === "subagent" && job.worker ? workerLabel(job.worker) : job.state})`).join(", ")}.`);
 			return {
 				content: [{ type: "text", text: ["Yielding. Incoming messages or results will resume this session.", ...parts].join(" ") }],
-				details: { delivered, running: live.map((j) => j.id) },
+				details: { delivered, running: running.map((j) => j.id) },
 				terminate: true,
 			};
 		},
@@ -1067,7 +1078,7 @@ export default function (handle: ExtensionAPI) {
 								`Subagent ${job.id} started (pid ${job.pid}).`,
 								`Task: ${oneLine(task)}`,
 								`Model: ${model}`,
-								"Replies and messages arrive automatically. After a turn this worker becomes idle; use message with this id to continue. Call wait alone when you have nothing useful to do.",
+								"Replies and messages arrive automatically. Background-job waits are quiet and resume automatically; do not nudge. Use message with this id for follow-ups or answers. A reply is not proof of task completion. Call wait alone when you have nothing useful to do.",
 								`Open its live conversation with /bg ${job.id}. Full event transcript: ${job.logPath}; diagnostics: ${job.errPath}.`,
 							].join("\n"),
 						},
@@ -1086,7 +1097,7 @@ export default function (handle: ExtensionAPI) {
 					initialId: args.trim() || undefined,
 					rows: () => [...registry().jobs.values()].filter((job) => isLive(job) || job.kind === "subagent").map((job) => ({
 						id: job.id, kind: job.kind,
-						state: job.stopping ? "stopping" : !isLive(job) && job.stopReason === "stopped" ? "stopped" : job.kind === "subagent" && isLive(job) ? job.worker?.phase ?? job.state : job.state,
+						state: job.stopping ? "stopping" : !isLive(job) && job.stopReason === "stopped" ? "stopped" : job.kind === "subagent" && isLive(job) && job.worker ? workerLabel(job.worker) : job.state,
 						task: job.kind === "subagent" ? job.task : job.command,
 						model: job.kind === "subagent" ? job.model : undefined,
 						activity: job.kind === "subagent" ? isLive(job) ? job.worker?.activity : "conversation closed" : undefined,

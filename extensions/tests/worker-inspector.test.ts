@@ -10,6 +10,7 @@ import {
 	formatKeyLabel,
 	initialScrollState,
 	isLiveState,
+	listActivityContext,
 	refollowTail,
 	rowSignature,
 	sanitizeWorkerText,
@@ -61,12 +62,53 @@ test("stateTone buckets parent state vocabulary without guessing on unknowns", (
 	assert.equal(stateTone("exited"), "success");
 	assert.equal(stateTone("ready for another message"), "success");
 	assert.equal(stateTone("something else entirely"), "muted");
+	// Attention states warn: pending jobs, blocked on input, a run cut short
+	// while the process lives. An empty turn is an anomaly, not a success.
+	assert.equal(stateTone("waiting"), "warning");
+	assert.equal(stateTone("input"), "warning");
+	assert.equal(stateTone("interrupted"), "warning");
+	assert.equal(stateTone("unexplained"), "error");
+	assert.equal(stateTone("Waiting on bg-2, bg-3 (auto-resume)"), "warning", "phrases bucket like their keyword");
+	assert.equal(stateTone("turn unexplained"), "error");
 	assert.equal(isLiveState("running"), true);
 	assert.equal(isLiveState("stopping"), true);
 	assert.equal(isLiveState("exited"), false);
 	assert.equal(isLiveState("idle"), true);
 	assert.equal(isLiveState("failed"), true, "a failed turn can still have a live process");
 	assert.equal(isLiveState("stopped"), false);
+	assert.equal(isLiveState("waiting"), true, "a worker waiting on jobs is addressable");
+	assert.equal(isLiveState("input"), true, "a worker waiting for parent/human input is addressable");
+	assert.equal(isLiveState("interrupted"), true, "an aborted run with a live process is addressable");
+	assert.equal(isLiveState("unexplained"), true);
+});
+
+test("listActivityContext surfaces parent context only for attention states", () => {
+	assert.equal(listActivityContext("waiting", "bg-2, bg-3 pending (auto-resume)"), "bg-2, bg-3 pending (auto-resume)");
+	assert.equal(listActivityContext("input", "  asked: which model?  "), "asked: which model?");
+	assert.equal(listActivityContext("interrupted", "run aborted; process alive"), "run aborted; process alive");
+	assert.equal(listActivityContext("unexplained", "no reply, no jobs, no message"), "no reply, no jobs, no message");
+	assert.equal(listActivityContext("waiting", undefined), "");
+	assert.equal(listActivityContext("waiting", "   "), "");
+	assert.equal(listActivityContext("working", "compiling"), "", "activity stays out of non-attention rows");
+	assert.equal(listActivityContext("idle", "ready for another message"), "");
+	assert.equal(listActivityContext("stopped", "conversation closed"), "");
+	// One line only: whitespace collapses and controls strip.
+	assert.equal(listActivityContext("waiting", "bg-1\tpending\ndefault"), "bg-1 pending default");
+	assert.equal(listActivityContext("waiting", "\x1b[31mbg-1\x1b[0m"), "bg-1");
+	// The known waiting label compacts for the list so a standard-width row
+	// names the bg id and automatic resumption together; detail stays full.
+	assert.equal(listActivityContext("waiting", "waiting on background work: bg-1; resumes automatically"), "bg-1 (auto-resume)");
+	assert.equal(listActivityContext("waiting", "waiting on background work: bg-1, bg-2; resumes automatically"), "bg-1, bg-2 (auto-resume)");
+	assert.equal(listActivityContext("waiting", "waiting on\nbackground work: bg-1;   resumes automatically"), "bg-1 (auto-resume)", "compaction applies after whitespace collapse");
+	assert.equal(
+		listActivityContext("waiting", "waiting on background work: bg-1; resumes manually"),
+		"waiting on background work: bg-1; resumes manually",
+		"unknown labels pass through verbatim - nothing is decided from text",
+	);
+	assert.equal(
+		listActivityContext("input", "waiting for input after message; no background work pending"),
+		"waiting for input after message; no background work pending",
+	);
 });
 
 test("textSignature and rowSignature detect the changes the view depends on", () => {
